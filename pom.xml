@@ -10,6 +10,7 @@
 
     <modules>
         <module>etcd-serializer</module>
+        <module>etcd-storage</module>
     </modules>
 
     <properties>
