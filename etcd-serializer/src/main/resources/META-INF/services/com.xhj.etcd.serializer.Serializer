@@ -1,0 +1,4 @@
+com.xhj.etcd.serializer.impl.JdkSerializer
+com.xhj.etcd.serializer.impl.JsonSerializer
+com.xhj.etcd.serializer.impl.HessianSerializer
+com.xhj.etcd.serializer.impl.ProtobufSerializer
