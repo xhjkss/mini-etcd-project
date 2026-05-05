@@ -1,0 +1,95 @@
+package com.xhj.etcd.rpc.core;
+
+import io.netty.channel.Channel;
+
+import java.lang.reflect.Method;
+
+/**
+ * RpcMethodDefinition
+ *
+ * @author XJks
+ * @description RPC 方法定义，描述服务方法的名称、反射方法、请求类型和连接感知能力。
+ *
+ * <p>
+ * TODO:
+ *  当前 RPC 框架只支持两类服务方法签名：
+ *  method(Request) 和 method(Request, Channel)。
+ *  第一个参数固定为请求对象，第二个参数如果存在，必须是 Netty Channel 或其子类型。
+ * </p>
+ */
+public class RpcMethodDefinition {
+
+    /**
+     * RPC 方法名。
+     *
+     * <p>客户端通过 RpcMessage.methodName 传递该名称，服务端据此定位具体服务方法。</p>
+     */
+    private final String methodName;
+
+    /**
+     * Java 反射方法对象。
+     *
+     * <p>服务端完成请求反序列化后，会通过该 Method 调用真实服务方法。</p>
+     */
+    private final Method method;
+
+    /**
+     * 请求对象类型。
+     *
+     * <p>固定取 RPC 方法的第一个参数类型，用于把 RpcMessage.data 反序列化为具体请求对象。</p>
+     */
+    private final Class<?> requestClass;
+
+    /**
+     * 是否需要感知底层连接。
+     *
+     * <p>TODO: true 表示方法签名为 method(Request, Channel)，服务方法可以直接使用 Channel 发送流式响应、关闭连接或绑定连接维度状态。</p>
+     */
+    private final boolean channelAware;
+
+    public RpcMethodDefinition(String methodName, Method method) {
+        this.methodName = methodName;
+        this.method = method;
+        this.requestClass = method.getParameterTypes()[0];
+        this.channelAware = method.getParameterTypes().length == 2;
+    }
+
+    public String getMethodName() {
+        return methodName;
+    }
+
+    public Method getMethod() {
+        return method;
+    }
+
+    public Class<?> getRequestClass() {
+        return requestClass;
+    }
+
+    public boolean isChannelAware() {
+        return channelAware;
+    }
+
+    /**
+     * 判断 Java 方法是否符合 RPC 服务方法签名。
+     *
+     * <p>当前只允许以下两种形式：</p>
+     *
+     * <pre>
+     * response method(request)
+     * response method(request, channel)
+     * </pre>
+     *
+     * @param method Java 反射方法对象
+     * @return true 表示该方法可以注册为 RPC 方法，false 表示方法签名不符合约定
+     */
+    public static boolean isRpcMethod(Method method) {
+        Class<?>[] parameterTypes = method.getParameterTypes();
+        if (parameterTypes.length == 1) {
+            return true;
+        }
+
+        // 第二个参数只有在可接收 Netty Channel 时，才表示该 RPC 方法需要连接感知能力。
+        return parameterTypes.length == 2 && Channel.class.isAssignableFrom(parameterTypes[1]);
+    }
+}
