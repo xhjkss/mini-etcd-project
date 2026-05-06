@@ -12,6 +12,7 @@
         <module>etcd-serializer</module>
         <module>etcd-storage</module>
         <module>etcd-rpc</module>
+        <module>etcd-kernel</module>
     </modules>
 
     <properties>
