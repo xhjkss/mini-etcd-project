@@ -37,4 +37,12 @@ public class RaftConfig {
      * 用于维持 Leader 身份并重置 Follower 的选举计时。</p>
      */
     private int heartbeatTimeoutTicks = 3;
+
+    /**
+     * 快照触发阈值（按已提交日志条目数计算）。
+     *
+     * <p>当自上次快照边界以来新增的已提交日志条目达到该阈值时，
+     * RaftNode 会在 Ready 中请求上层生成状态机快照。</p>
+     */
+    private int snapshotTriggerLogCount = 50;
 }

@@ -1,10 +1,17 @@
 package com.xhj.etcd.kernel.raft;
 
-import com.xhj.etcd.kernel.raft.event.*;
+import com.xhj.etcd.kernel.raft.core.RaftReady;
+import com.xhj.etcd.kernel.raft.event.RaftCreateSnapshotEventData;
+import com.xhj.etcd.kernel.raft.event.RaftEvent;
+import com.xhj.etcd.kernel.raft.event.RaftEventCodec;
+import com.xhj.etcd.kernel.raft.event.RaftEventType;
 import com.xhj.etcd.kernel.raft.log.RaftLogEntry;
-import com.xhj.etcd.kernel.raft.raftrpc.*;
-import com.xhj.etcd.serializer.Serializer;
-import com.xhj.etcd.serializer.SerializerRegistry;
+import com.xhj.etcd.kernel.raft.raftrpc.AppendEntriesRequest;
+import com.xhj.etcd.kernel.raft.raftrpc.AppendEntriesResponse;
+import com.xhj.etcd.kernel.raft.raftrpc.InstallSnapshotRequest;
+import com.xhj.etcd.kernel.raft.raftrpc.InstallSnapshotResponse;
+import com.xhj.etcd.kernel.raft.raftrpc.RequestVoteRequest;
+import com.xhj.etcd.kernel.raft.raftrpc.RequestVoteResponse;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -16,31 +23,28 @@ import static org.junit.Assert.*;
  * RaftEventCodecTest
  *
  * @author XJks
- * @description RaftEventCodec编解码测试。
+ * @description RaftEventCodec 事件对象读写测试。
  */
 public class RaftEventCodecTest {
 
-    private Serializer serializer;
     private RaftEventCodec codec;
 
     @Before
     public void setUp() {
-        serializer = SerializerRegistry.getDefaultSerializer();
-        codec = new RaftEventCodec(serializer);
+        codec = new RaftEventCodec();
     }
 
     @Test
     public void testEncodeAndDecodeProposeEvent() {
-        RaftProposeEventData eventData = new RaftProposeEventData();
-        eventData.setCommandData(new byte[]{1, 2, 3});
+        byte[] commandData = new byte[]{1, 2, 3};
 
-        RaftEvent event = codec.encodeRaftEvent(RaftEventType.PROPOSE, "test-event-1", eventData);
+        RaftEvent event = codec.encodeRaftEvent(RaftEventType.PROPOSE, "test-event-1", commandData);
         assertEquals(RaftEventType.PROPOSE, event.getType());
         assertEquals("test-event-1", event.getEventId());
-        assertNotNull(event.getEventData());
+        assertSame(commandData, event.getData());
 
-        RaftProposeEventData decoded = codec.decodeRaftProposeEventData(event);
-        assertArrayEquals(new byte[]{1, 2, 3}, decoded.getCommandData());
+        byte[] decoded = codec.decodeProposeCommandData(event);
+        assertArrayEquals(new byte[]{1, 2, 3}, decoded);
     }
 
     @Test
@@ -164,12 +168,12 @@ public class RaftEventCodecTest {
 
     @Test
     public void testEncodeAndDecodeAdvanceEvent() {
-        RaftAdvanceEventData eventData = new RaftAdvanceEventData();
+        RaftReady ready = new RaftReady();
 
-        RaftEvent event = codec.encodeRaftEvent(RaftEventType.ADVANCE, eventData);
-        RaftAdvanceEventData decoded = codec.decodeRaftAdvanceEventData(event);
+        RaftEvent event = codec.encodeRaftEvent(RaftEventType.ADVANCE, ready);
+        RaftReady decoded = codec.decodeRaftReady(event);
 
-        assertNotNull(decoded);
+        assertSame(ready, decoded);
     }
 
     @Test
@@ -190,9 +194,9 @@ public class RaftEventCodecTest {
         RaftEvent event = new RaftEvent();
         event.setType(RaftEventType.PROPOSE);
         event.setEventId("test");
-        event.setEventData(null);
+        event.setData(null);
 
-        RaftProposeEventData decoded = codec.decodeRaftProposeEventData(event);
-        assertNotNull(decoded);
+        byte[] decoded = codec.decodeProposeCommandData(event);
+        assertNull(decoded);
     }
 }

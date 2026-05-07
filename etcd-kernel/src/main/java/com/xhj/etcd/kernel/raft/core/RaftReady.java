@@ -63,4 +63,12 @@ public class RaftReady implements Serializable {
      * <p>EtcdNode 应按列表顺序 apply 这些消息，确保状态机推进顺序与 Raft commit 顺序一致。</p>
      */
     private List<RaftApplyMessage> committedEntries = new ArrayList<>();
+
+    /**
+     * 是否请求上层创建状态机快照。
+     *
+     * <p>该字段只表示 RaftNode 已经判断当前日志数量达到快照阈值；真正的状态机快照数据仍由 EtcdNode 生成。
+     * EtcdNode 处理该请求后，会通过 submitRaftCreateSnapshotEvent 将快照数据回传给 RaftNode。</p>
+     */
+    private boolean snapshotCreateRequested;
 }

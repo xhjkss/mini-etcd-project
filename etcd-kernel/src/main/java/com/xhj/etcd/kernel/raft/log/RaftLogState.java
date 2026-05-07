@@ -355,6 +355,45 @@ public class RaftLogState {
         lastIncludedTerm = targetLastIncludedTerm;
     }
 
+
+    /**
+     * 根据持久化日志恢复 snapshot 边界之后的日志条目。
+     *
+     * <p>该方法用于节点启动恢复。调用方应先通过 restoreLogStateBySnapshotBoundary 恢复 snapshot 边界，
+     * 再把持久化的剩余日志交给该方法恢复到 entries 中。</p>
+     *
+     * <p>恢复要求：</p>
+     * <ul>
+     *     <li>只接收 index 大于 lastIncludedIndex 的日志。</li>
+     *     <li>日志必须从 lastIncludedIndex + 1 开始连续排列。</li>
+     *     <li>方法内部会复制日志条目，避免外部引用污染 RaftLogState。</li>
+     * </ul>
+     *
+     * @param restoredEntries 持久化恢复出的日志条目
+     */
+    public void restoreLogEntriesAfterSnapshot(List<RaftLogEntry> restoredEntries) {
+        entries.clear();
+        if (restoredEntries == null || restoredEntries.isEmpty()) {
+            return;
+        }
+
+        List<RaftLogEntry> sortedEntries = new ArrayList<>(restoredEntries);
+        sortedEntries.sort((left, right) -> Long.compare(left.getIndex(), right.getIndex()));
+
+        long expectedIndex = lastIncludedIndex + 1L;
+        for (RaftLogEntry entry : sortedEntries) {
+            if (entry == null || entry.getIndex() <= lastIncludedIndex) {
+                continue;
+            }
+            if (entry.getIndex() != expectedIndex) {
+                throw new IllegalStateException("restored raft log entries must be continuous, expected="
+                        + expectedIndex + ", actual=" + entry.getIndex());
+            }
+            entries.add(copyLogEntry(entry));
+            expectedIndex++;
+        }
+    }
+
     // ==================== 日志截断 ====================
 
     /**

@@ -1,12 +1,10 @@
 package com.xhj.etcd.kernel.raft.core;
 
 import com.xhj.etcd.kernel.raft.apply.RaftApplyMessage;
-import com.xhj.etcd.kernel.raft.event.RaftAdvanceEventData;
 import com.xhj.etcd.kernel.raft.event.RaftCreateSnapshotEventData;
 import com.xhj.etcd.kernel.raft.event.RaftEvent;
 import com.xhj.etcd.kernel.raft.event.RaftEventCodec;
 import com.xhj.etcd.kernel.raft.event.RaftEventType;
-import com.xhj.etcd.kernel.raft.event.RaftProposeEventData;
 import com.xhj.etcd.kernel.raft.log.RaftLogEntry;
 import com.xhj.etcd.kernel.raft.log.RaftLogState;
 import com.xhj.etcd.kernel.raft.raftrpc.AppendEntriesRequest;
@@ -27,6 +25,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -193,6 +192,16 @@ public class RaftNode {
     private final List<RaftApplyMessage> pendingCommittedEntries = new ArrayList<>();
 
     /**
+     * 自上次快照边界以来新增的 committed 日志条目数。
+     */
+    private long committedLogCountSinceSnapshot;
+
+    /**
+     * 当前是否等待上层创建并回传快照。
+     */
+    private final AtomicBoolean snapshotCreateRequestedPending = new AtomicBoolean(false);
+
+    /**
      * 等待 EtcdNode 发送的 Raft RPC 消息。
      *
      * <p>RaftNode 只负责决定“发什么消息、发给哪个 Raft 节点”；
@@ -300,7 +309,7 @@ public class RaftNode {
         this.config = config;
         this.raftLogState = raftLogState;
         this.serializer = serializer;
-        this.raftEventCodec = new RaftEventCodec(serializer);
+        this.raftEventCodec = new RaftEventCodec();
         this.electionTimeoutTicks = buildElectionTimeoutTicks(nodeId, config);
     }
 
@@ -315,7 +324,7 @@ public class RaftNode {
     }
 
     /**
-     * 测试用：恢复 HardState。
+     * 恢复 HardState。
      */
     public void restoreHardState(RaftHardState hardState) {
         if (hardState == null) {
@@ -324,6 +333,44 @@ public class RaftNode {
         currentTerm = Math.max(0L, hardState.getCurrentTerm());
         votedFor = hardState.getVotedFor();
         pendingHardStateToPersist = null;
+    }
+
+    /**
+     * 启动恢复入口：根据已持久化快照恢复 Raft 运行边界。
+     */
+    public void restoreFromSnapshot(RaftSnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+
+        raftLogState.restoreLogStateBySnapshotBoundary(snapshot.getLastIncludedIndex(), snapshot.getLastIncludedTerm());
+        latestSnapshot = copySnapshot(snapshot);
+
+        commitIndex = Math.max(commitIndex, snapshot.getLastIncludedIndex());
+        lastApplied = Math.max(lastApplied, snapshot.getLastIncludedIndex());
+
+        pendingEntries.clear();
+        pendingCommittedEntries.clear();
+        pendingSnapshotToPersist = null;
+        pendingSnapshotToApply = null;
+
+        committedLogCountSinceSnapshot = Math.max(0L, commitIndex - snapshot.getLastIncludedIndex());
+        snapshotCreateRequestedPending.set(false);
+    }
+
+
+    /**
+     * 启动恢复入口：恢复 snapshot 边界之后仍保留的日志条目。
+     *
+     * <p>该方法只用于节点启动恢复。EtcdNode 会先恢复 HardState 和 Snapshot，
+     * 再把持久化的剩余日志交回 RaftNode，使 RaftLogState 可以从完整的本地日志边界继续工作。</p>
+     *
+     * @param entries snapshot 边界之后仍保留的日志条目
+     */
+    public void restoreLogEntries(List<RaftLogEntry> entries) {
+        raftLogState.restoreLogEntriesAfterSnapshot(entries);
+        pendingEntries.clear();
+        pendingCommittedEntries.clear();
     }
 
     /**
@@ -456,7 +503,7 @@ public class RaftNode {
         RaftEventType type = event.getType();
         switch (type) {
             case PROPOSE:
-                completeRaftProposeEvent(event, raftEventCodec.decodeRaftProposeEventData(event));
+                completeRaftProposeEvent(event, raftEventCodec.decodeProposeCommandData(event));
                 return;
             case REQUEST_VOTE:
                 step(raftEventCodec.decodeRequestVoteRequest(event));
@@ -497,7 +544,7 @@ public class RaftNode {
      * @param event Advance 事件
      */
     private void handleAdvanceEvent(RaftEvent event) {
-        RaftReady ready = raftEventCodec.decodeRaftAdvanceEventData(event).getRaftReady();
+        RaftReady ready = raftEventCodec.decodeRaftReady(event);
         advance(ready);
         waitingReadyAdvance = false;
     }
@@ -509,17 +556,17 @@ public class RaftNode {
      * 如果当前节点是 Leader，accepted 表示日志已经被 Leader 接收并追加到本地；
      * 该日志真正 committed 并 apply 到状态机，还需要等待后续 RaftReady / Advance 流程。</p>
      *
-     * @param event     Raft 事件
-     * @param eventData Propose 事件数据
+     * @param event       Raft 事件
+     * @param commandData 上层命令字节
      */
-    private void completeRaftProposeEvent(RaftEvent event, RaftProposeEventData eventData) {
+    private void completeRaftProposeEvent(RaftEvent event, byte[] commandData) {
         CompletableFuture<RaftProposeResult> proposeFuture = pendingRaftProposeFutureMap.remove(event.getEventId());
         if (proposeFuture == null) {
             return;
         }
 
         try {
-            RaftProposeResult proposeResult = propose(eventData.getCommandData());
+            RaftProposeResult proposeResult = propose(commandData);
             proposeFuture.complete(proposeResult);
         } catch (Exception e) {
             proposeFuture.completeExceptionally(e);
@@ -569,9 +616,8 @@ public class RaftNode {
         CompletableFuture<RaftProposeResult> future = new CompletableFuture<>();
         pendingRaftProposeFutureMap.put(eventId, future);
 
-        RaftProposeEventData eventData = new RaftProposeEventData();
-        eventData.setCommandData(commandData);
-        offerRaftEvent(raftEventCodec.encodeRaftEvent(RaftEventType.PROPOSE, eventId, eventData));
+        // PROPOSE 是 RaftNode 内部事件，直接携带上层命令字节即可，不再额外包装事件数据对象。
+        offerRaftEvent(raftEventCodec.encodeRaftEvent(RaftEventType.PROPOSE, eventId, commandData));
         return future;
     }
 
@@ -658,9 +704,8 @@ public class RaftNode {
      * @param ready 已处理完成的 Ready
      */
     public void submitRaftAdvanceEvent(RaftReady ready) {
-        RaftAdvanceEventData eventData = new RaftAdvanceEventData();
-        eventData.setRaftReady(ready);
-        offerRaftEvent(raftEventCodec.encodeRaftEvent(RaftEventType.ADVANCE, eventData));
+        // ADVANCE 事件只在 RaftNode 内部队列流转，直接携带已处理完成的 Ready。
+        offerRaftEvent(raftEventCodec.encodeRaftEvent(RaftEventType.ADVANCE, ready));
     }
 
     private void offerRaftEvent(RaftEvent event) {
@@ -760,7 +805,8 @@ public class RaftNode {
                 || pendingSnapshotToPersist != null
                 || pendingSnapshotToApply != null
                 || !pendingCommittedEntries.isEmpty()
-                || !pendingRaftRpcMessages.isEmpty();
+                || !pendingRaftRpcMessages.isEmpty()
+                || snapshotCreateRequestedPending.get();
     }
 
     /**
@@ -788,6 +834,7 @@ public class RaftNode {
         ready.setSnapshotToApply(copySnapshot(pendingSnapshotToApply));
         ready.setCommittedEntries(new ArrayList<>(pendingCommittedEntries));
         ready.setMessagesToSend(new ArrayList<>(pendingRaftRpcMessages));
+        ready.setSnapshotCreateRequested(snapshotCreateRequestedPending.get());
         return ready;
     }
 
@@ -820,6 +867,13 @@ public class RaftNode {
         removeReadyItems(pendingEntries, ready.getEntriesToPersist().size());
         removeReadyItems(pendingCommittedEntries, ready.getCommittedEntries().size());
         removeReadyItems(pendingRaftRpcMessages, ready.getMessagesToSend().size());
+
+        if (ready.isSnapshotCreateRequested()) {
+            snapshotCreateRequestedPending.set(false);
+        }
+
+        // TODO: 重置等待标志，允许发布下一轮 Ready。
+        waitingReadyAdvance = false;
     }
 
     // ==================== 选举逻辑 ====================
@@ -1255,6 +1309,9 @@ public class RaftNode {
         raftLogState.compactLogEntriesToSnapshotBoundary(snapshot.getLastIncludedIndex(), snapshot.getLastIncludedTerm());
         latestSnapshot = copySnapshot(snapshot);
         pendingSnapshotToPersist = copySnapshot(snapshot);
+
+        committedLogCountSinceSnapshot = Math.max(0L, commitIndex - snapshot.getLastIncludedIndex());
+        snapshotCreateRequestedPending.set(false);
     }
 
     // ==================== 提交推进逻辑 ====================
@@ -1298,7 +1355,26 @@ public class RaftNode {
                 continue;
             }
             pendingCommittedEntries.add(RaftApplyMessage.command(lastApplied, entry.getCommandData()));
+            committedLogCountSinceSnapshot++;
+            maybeRequestSnapshotCreate();
         }
+    }
+
+    /**
+     * 根据提交日志计数阈值决定是否请求上层创建快照。
+     */
+    private void maybeRequestSnapshotCreate() {
+        int triggerLogCount = config.getSnapshotTriggerLogCount();
+        if (triggerLogCount <= 0) {
+            return;
+        }
+        if (snapshotCreateRequestedPending.get()) {
+            return;
+        }
+        if (committedLogCountSinceSnapshot < triggerLogCount) {
+            return;
+        }
+        snapshotCreateRequestedPending.set(true);
     }
 
     // ==================== 角色切换 ====================

@@ -8,32 +8,43 @@ import java.io.Serializable;
  * RaftEvent
  *
  * @author XJks
- * @description Raft 内部事件信封，用于统一封装 RaftNode 事件循环需要处理的输入。
+ * @description RaftNode 内部事件信封，用于统一封装 raft-event-loop 需要处理的输入。
  *
- * <p>TODO: RaftEvent 只负责表达事件类型、事件标识和序列化后的事件数据；具体事件载荷由 RaftEventCodec 按 type 进行编解码，RaftEvent 本身不感知具体业务对象类型。</p>
+ * <p>
+ * TODO:
+ *  RaftEvent 只在 RaftNode 当前 JVM 内部事件队列中流转，不进入网络、日志或磁盘，
+ *  因此 data 可以直接保存具体事件对象，避免为 PROPOSE / ADVANCE 这类事件额外创建无意义的套壳对象。
+ * </p>
+ *
+ * <p>data 常见类型：</p>
+ * <ul>
+ *     <li>PROPOSE：上层命令字节 byte[]。</li>
+ *     <li>REQUEST_VOTE / APPEND_ENTRIES / INSTALL_SNAPSHOT：对应 Raft RPC 请求或响应对象。</li>
+ *     <li>ADVANCE：EtcdNode 已处理完成的 RaftReady。</li>
+ *     <li>CREATE_SNAPSHOT：RaftCreateSnapshotEventData。</li>
+ * </ul>
  */
 @Data
 public class RaftEvent implements Serializable {
 
+    private static final long serialVersionUID = 1L;
+
     /**
      * 事件类型。
-     *
-     * <p>RaftNode 事件循环根据该字段决定如何反序列化 eventData，以及分发到哪个处理逻辑。</p>
      */
     private RaftEventType type;
 
     /**
      * 事件唯一标识。
      *
-     * <p>用于标识一次事件提交过程。对于需要返回处理结果的事件，eventId 可以作为请求方和事件循环之间关联 Future 或回调结果的标识。</p>
+     * <p>PROPOSE 事件需要通过该字段关联等待中的 propose future；其他无需响应的事件可以为空。</p>
      */
     private String eventId;
 
     /**
-     * 序列化后的事件数据。
+     * 事件数据对象。
      *
-     * <p>不同事件类型对应不同的数据对象，例如 propose、advance、RPC 消息或创建快照事件；
-     * 该字段只保存字节数据，具体类型由 RaftEventCodec 负责还原。</p>
+     * <p>该对象只在 RaftNode 内部事件循环流转，不做序列化；真正需要持久化和复制的是 RaftLogEntry.commandData。</p>
      */
-    private byte[] eventData;
+    private Object data;
 }

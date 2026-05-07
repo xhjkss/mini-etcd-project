@@ -79,6 +79,23 @@ public class NettyRpcFailurePathTest {
         }
     }
 
+    @Test
+    public void shouldFailWhenServiceIsNotRegistered() throws Exception {
+        NodeEndpoint endpoint = new NodeEndpoint("node-missing-service", "127.0.0.1", findFreePort());
+        NettyRpcServer server = new NettyRpcServer(endpoint, new JdkSerializer());
+        NettyRpcClient client = new NettyRpcClient(new JdkSerializer(), 5000L);
+        server.start();
+        try {
+            client.call(endpoint, "MissingService", "echo", request("hello"), EchoResponse.class);
+            Assert.fail("calling unregistered service should fail");
+        } catch (RpcException expected) {
+            Assert.assertTrue(expected.getMessage() != null);
+        } finally {
+            client.shutdown();
+            server.stop();
+        }
+    }
+
     private EchoRequest request(String message) {
         EchoRequest request = new EchoRequest();
         request.setMessage(message);
