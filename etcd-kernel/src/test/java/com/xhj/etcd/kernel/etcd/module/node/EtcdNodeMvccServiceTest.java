@@ -4,6 +4,8 @@ import com.xhj.etcd.kernel.etcd.node.EtcdNode;
 import com.xhj.etcd.kernel.raft.core.RaftConfig;
 import com.xhj.etcd.kernel.raft.core.RaftRoleType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
@@ -169,6 +171,90 @@ public class EtcdNodeMvccServiceTest {
         assertNotNull(invalidIntervalResponse);
         assertNotNull(invalidIntervalResponse.getHeader());
         assertFalse(invalidIntervalResponse.getHeader().isSuccess());
+    }
+
+    @Test
+    public void shouldCompactByRpcAndRejectCompactedHistoricalReads() throws Exception {
+        awaitLeader(node, 3000L);
+
+        EtcdRpcResponse<PutResponse> firstPutResponse = node.handleEtcdRpcPutRequest(new PutRequest("compact/node/key", "v1"));
+        EtcdRpcResponse<PutResponse> secondPutResponse = node.handleEtcdRpcPutRequest(new PutRequest("compact/node/key", "v2"));
+        assertTrue(firstPutResponse.getHeader().isSuccess());
+        assertTrue(secondPutResponse.getHeader().isSuccess());
+
+        CompactRequest compactRequest = new CompactRequest();
+        compactRequest.setRevision(secondPutResponse.getBody().getRevision());
+        EtcdRpcResponse<CompactResponse> compactResponse = node.handleEtcdRpcCompactRequest(compactRequest);
+        assertNotNull(compactResponse);
+        assertNotNull(compactResponse.getHeader());
+        assertTrue(compactResponse.getHeader().isSuccess());
+        assertNotNull(compactResponse.getBody());
+        assertEquals(secondPutResponse.getBody().getRevision(), compactResponse.getBody().getCompactRevision());
+        assertEquals(secondPutResponse.getBody().getRevision(), compactResponse.getBody().getCurrentRevision());
+
+        GetRequest compactedGetRequest = new GetRequest();
+        compactedGetRequest.setKey("compact/node/key");
+        compactedGetRequest.setRevision(firstPutResponse.getBody().getRevision());
+        compactedGetRequest.setLinearizableRead(false);
+        EtcdRpcResponse<GetResponse> compactedGetResponse = node.handleEtcdRpcGetRequest(compactedGetRequest);
+        assertNotNull(compactedGetResponse);
+        assertNotNull(compactedGetResponse.getHeader());
+        assertFalse(compactedGetResponse.getHeader().isSuccess());
+        assertTrue(compactedGetResponse.getHeader().getMessage().contains("compacted"));
+
+        RangeRequest compactedRangeRequest = new RangeRequest();
+        compactedRangeRequest.setStartKey("compact/node/");
+        compactedRangeRequest.setPrefixMatch(true);
+        compactedRangeRequest.setLinearizableRead(false);
+        compactedRangeRequest.setRevision(firstPutResponse.getBody().getRevision());
+        EtcdRpcResponse<RangeResponse> compactedRangeResponse = node.handleEtcdRpcRangeRequest(compactedRangeRequest);
+        assertNotNull(compactedRangeResponse);
+        assertNotNull(compactedRangeResponse.getHeader());
+        assertFalse(compactedRangeResponse.getHeader().isSuccess());
+        assertTrue(compactedRangeResponse.getHeader().getMessage().contains("compacted"));
+    }
+
+    @Test
+    public void shouldRejectCompactRequestWhenRevisionIsAlreadyCompacted() throws Exception {
+        awaitLeader(node, 3000L);
+
+        EtcdRpcResponse<PutResponse> putResponse = node.handleEtcdRpcPutRequest(new PutRequest("compact/node/duplicate", "v1"));
+        assertTrue(putResponse.getHeader().isSuccess());
+
+        CompactRequest compactRequest = new CompactRequest();
+        compactRequest.setRevision(putResponse.getBody().getRevision());
+        EtcdRpcResponse<CompactResponse> firstCompactResponse = node.handleEtcdRpcCompactRequest(compactRequest);
+        assertNotNull(firstCompactResponse);
+        assertNotNull(firstCompactResponse.getHeader());
+        assertTrue(firstCompactResponse.getHeader().isSuccess());
+
+        EtcdRpcResponse<CompactResponse> secondCompactResponse = node.handleEtcdRpcCompactRequest(compactRequest);
+        assertNotNull(secondCompactResponse);
+        assertNotNull(secondCompactResponse.getHeader());
+        assertFalse(secondCompactResponse.getHeader().isSuccess());
+        assertTrue(secondCompactResponse.getHeader().getMessage().contains("compacted"));
+    }
+
+    @Test
+    public void shouldRejectCompactRequestWhenRevisionIsInvalid() throws Exception {
+        awaitLeader(node, 3000L);
+
+        EtcdRpcResponse<PutResponse> putResponse = node.handleEtcdRpcPutRequest(new PutRequest("compact/node/invalid", "v1"));
+        assertTrue(putResponse.getHeader().isSuccess());
+
+        CompactRequest nonPositiveRequest = new CompactRequest();
+        nonPositiveRequest.setRevision(0L);
+        EtcdRpcResponse<CompactResponse> nonPositiveResponse = node.handleEtcdRpcCompactRequest(nonPositiveRequest);
+        assertNotNull(nonPositiveResponse);
+        assertNotNull(nonPositiveResponse.getHeader());
+        assertFalse(nonPositiveResponse.getHeader().isSuccess());
+
+        CompactRequest futureRevisionRequest = new CompactRequest();
+        futureRevisionRequest.setRevision(putResponse.getBody().getRevision() + 10L);
+        EtcdRpcResponse<CompactResponse> futureRevisionResponse = node.handleEtcdRpcCompactRequest(futureRevisionRequest);
+        assertNotNull(futureRevisionResponse);
+        assertNotNull(futureRevisionResponse.getHeader());
+        assertFalse(futureRevisionResponse.getHeader().isSuccess());
     }
 
     private void awaitLeader(EtcdNode targetNode, long timeoutMillis) throws Exception {

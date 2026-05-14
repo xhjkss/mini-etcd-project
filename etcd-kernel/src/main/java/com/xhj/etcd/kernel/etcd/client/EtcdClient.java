@@ -4,6 +4,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
@@ -26,7 +28,7 @@ import java.util.Map;
  * EtcdClient
  *
  * @author XJks
- * @description 当前阶段 Etcd 客户端，覆盖 MVCC KV 核心 API。
+ * @description 当前阶段 Etcd 客户端，覆盖 MVCC KV 核心 API（含历史压缩）。
  */
 public class EtcdClient {
 
@@ -132,6 +134,15 @@ public class EtcdClient {
      */
     public DeleteRangeResponse deleteRange(DeleteRangeRequest request) {
         return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_DELETE_RANGE_REQUEST_METHOD_NAME, request, DeleteRangeResponse.class);
+    }
+
+    /**
+     * COMPACT 操作。
+     *
+     * <p>Compact 会改变整个状态机的历史可读窗口，必须统一路由到 Leader 经 Raft apply 执行。</p>
+     */
+    public CompactResponse compact(CompactRequest request) {
+        return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME, request, CompactResponse.class);
     }
 
     /**

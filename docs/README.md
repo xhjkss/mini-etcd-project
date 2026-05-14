@@ -12,3 +12,6 @@
 
 3. `architecture-03-txn.md`
 - Txn 原子事务模型、校验逻辑、执行方法链与一致性语义说明。
+
+4. `architecture-04-compact.md`
+- Compact 历史压缩模型、边界错误语义、快照恢复与网络一致性说明。

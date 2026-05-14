@@ -3,6 +3,7 @@ package com.xhj.etcd.kernel.etcd.module.node;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
@@ -193,6 +194,52 @@ public class EtcdNodeTxnServiceTest {
         assertNull(rollbackKeyResponse.getBody().getValue());
 
         EtcdRpcResponse<PutResponse> probePutResponse = node.handleEtcdRpcPutRequest(new PutRequest("txn/rollback/probe", "probe"));
+        assertTrue(probePutResponse.getHeader().isSuccess());
+        assertEquals(baselineRevision + 1L, probePutResponse.getBody().getRevision());
+    }
+
+    @Test
+    public void shouldRollbackTxnWhenBranchHistoricalReadHitsCompactedBoundary() throws Exception {
+        awaitLeader(node, 3000L);
+
+        EtcdRpcResponse<PutResponse> firstPutResponse = node.handleEtcdRpcPutRequest(new PutRequest("txn/compact/source", "v1"));
+        EtcdRpcResponse<PutResponse> secondPutResponse = node.handleEtcdRpcPutRequest(new PutRequest("txn/compact/source", "v2"));
+        assertTrue(firstPutResponse.getHeader().isSuccess());
+        assertTrue(secondPutResponse.getHeader().isSuccess());
+
+        CompactRequest compactRequest = new CompactRequest();
+        compactRequest.setRevision(secondPutResponse.getBody().getRevision());
+        assertTrue(node.handleEtcdRpcCompactRequest(compactRequest).getHeader().isSuccess());
+
+        EtcdRpcResponse<PutResponse> baselinePutResponse = node.handleEtcdRpcPutRequest(new PutRequest("txn/compact/baseline", "baseline"));
+        assertTrue(baselinePutResponse.getHeader().isSuccess());
+        long baselineRevision = baselinePutResponse.getBody().getRevision();
+
+        TxnRequest txnRequest = new TxnRequest();
+        txnRequest.getCompareConditions().add(TxnCompareCondition.version(
+                "txn/compact/guard",
+                TxnCompareOperatorType.EQUAL,
+                0L));
+        txnRequest.getSuccessOperations().add(TxnOperationRequest.put(new PutRequest("txn/compact/rollback-target", "temp")));
+        txnRequest.getSuccessOperations().add(TxnOperationRequest.get(new GetRequest(
+                "txn/compact/source",
+                firstPutResponse.getBody().getRevision(),
+                false)));
+
+        EtcdRpcResponse<TxnResponse> txnResponse = node.handleEtcdRpcTxnRequest(txnRequest);
+        assertNotNull(txnResponse);
+        assertNotNull(txnResponse.getHeader());
+        assertFalse(txnResponse.getHeader().isSuccess());
+        assertTrue(txnResponse.getHeader().getMessage().contains("compacted"));
+        assertNull(txnResponse.getBody());
+
+        EtcdRpcResponse<GetResponse> rolledBackKeyResponse = node.handleEtcdRpcGetRequest(new GetRequest("txn/compact/rollback-target", false));
+        assertNotNull(rolledBackKeyResponse);
+        assertNotNull(rolledBackKeyResponse.getHeader());
+        assertTrue(rolledBackKeyResponse.getHeader().isSuccess());
+        assertNull(rolledBackKeyResponse.getBody().getValue());
+
+        EtcdRpcResponse<PutResponse> probePutResponse = node.handleEtcdRpcPutRequest(new PutRequest("txn/compact/probe", "probe"));
         assertTrue(probePutResponse.getHeader().isSuccess());
         assertEquals(baselineRevision + 1L, probePutResponse.getBody().getRevision());
     }

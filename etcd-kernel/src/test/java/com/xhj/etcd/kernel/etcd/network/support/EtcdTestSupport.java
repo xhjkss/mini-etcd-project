@@ -1,6 +1,8 @@
 package com.xhj.etcd.kernel.etcd.network.support;
 
 import com.xhj.etcd.kernel.etcd.node.EtcdNode;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
@@ -182,6 +184,22 @@ public final class EtcdTestSupport {
         return client.call(endpoint,
                 EtcdNode.RPC_SERVICE_NAME,
                 EtcdNode.HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 COMPACT。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  COMPACT 请求
+     * @return COMPACT 响应
+     */
+    public static EtcdRpcResponse<CompactResponse> callCompactByRpc(RpcClient client, NodeEndpoint endpoint, CompactRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME,
                 request,
                 EtcdRpcResponse.class);
     }

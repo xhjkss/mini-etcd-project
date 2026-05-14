@@ -24,6 +24,8 @@ import com.xhj.etcd.kernel.etcd.command.EtcdCommandApplyResult;
 import com.xhj.etcd.kernel.etcd.command.EtcdCommandCodec;
 import com.xhj.etcd.kernel.etcd.command.EtcdCommandRegistry;
 import com.xhj.etcd.kernel.etcd.command.EtcdCommandType;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
@@ -81,7 +83,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>阶段边界：</p>
  * <ul>
  *     <li>当前实现服务于 MVCC KV 与 Raft / RPC / Storage 联调闭环，不是未来完整 etcd server 基类。</li>
- *     <li>PUT、DELETE、DELETE_RANGE、TXN 一定转换为 EtcdCommand 并进入 Raft propose。</li>
+ *     <li>PUT、DELETE、DELETE_RANGE、TXN、COMPACT 一定转换为 EtcdCommand 并进入 Raft propose。</li>
  *     <li>GET、RANGE 默认线性一致读会进入 Raft，显式非线性一致读或历史 revision 读取则由 etcd-event-loop 本地处理。</li>
  *     <li>TXN compare + success/failure 分支在一次 apply 中原子执行，失败时回滚到执行前快照。</li>
  *     <li>状态机使用 KeyValueStore 表达，快照数据只保存在 RaftSnapshot.stateMachineData 中。</li>
@@ -275,6 +277,8 @@ public class EtcdNode {
 
     public static final String HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME = "handleEtcdRpcTxnRequest";
 
+    public static final String HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME = "handleEtcdRpcCompactRequest";
+
     public static final String HANDLE_RAFT_RPC_REQUEST_VOTE_REQUEST_METHOD_NAME = "handleRaftRpcRequestVoteRequest";
 
     public static final String HANDLE_RAFT_RPC_REQUEST_VOTE_RESPONSE_METHOD_NAME = "handleRaftRpcRequestVoteResponse";
@@ -434,7 +438,7 @@ public class EtcdNode {
      *
      * <p>处理流程：</p>
      * <p>1) 根据 event.type 取出对应 XxxRequest；</p>
-     * <p>2) PUT / DELETE / DELETE_RANGE / TXN 必然转换为 EtcdCommand 进入 Raft；</p>
+     * <p>2) PUT / DELETE / DELETE_RANGE / TXN / COMPACT 必然转换为 EtcdCommand 进入 Raft；</p>
      * <p>3) GET / RANGE 根据 linearizableRead 和历史 revision 决定进入 Raft 还是本地读取；</p>
      * <p>4) 本地处理直接完成 event future，Raft 路径则等待 apply 阶段回填。</p>
      *
@@ -460,6 +464,9 @@ public class EtcdNode {
                     return;
                 case TXN:
                     submitEtcdCommandFromEvent(event, EtcdCommandType.TXN, eventCodec.decodeEtcdEventData(event, EtcdEventType.TXN, TxnRequest.class));
+                    return;
+                case COMPACT:
+                    submitEtcdCommandFromEvent(event, EtcdCommandType.COMPACT, eventCodec.decodeEtcdEventData(event, EtcdEventType.COMPACT, CompactRequest.class));
                     return;
                 default:
                     completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), "unsupported etcd event type: " + event.getType()));
@@ -1190,6 +1197,13 @@ public class EtcdNode {
                     }
                     return EtcdCommandApplyResult.success(command.getCommandId(), applyTxnRequest(request));
                 }
+                case COMPACT: {
+                    CompactRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.COMPACT, CompactRequest.class);
+                    if (request == null) {
+                        return EtcdCommandApplyResult.error(command.getCommandId(), "compact request is null");
+                    }
+                    return EtcdCommandApplyResult.success(command.getCommandId(), applyCompactRequest(request));
+                }
                 default:
                     return EtcdCommandApplyResult.error(command.getCommandId(), "unsupported command type: " + type);
             }
@@ -1305,6 +1319,16 @@ public class EtcdNode {
                     record.getVersion()));
         }
         return DeleteRangeResponse.of(result.getDeletedCount(), result.getRevision(), prevItems);
+    }
+
+    /**
+     * 应用 COMPACT 请求。
+     *
+     * <p>Compact 不会推进 currentRevision，只会收缩历史可读窗口并推进 compactRevision。</p>
+     */
+    private CompactResponse applyCompactRequest(CompactRequest request) {
+        keyValueStore.compact(request.getRevision());
+        return CompactResponse.of(keyValueStore.compactRevision(), keyValueStore.currentRevision());
     }
 
     /**
@@ -1784,6 +1808,15 @@ public class EtcdNode {
      */
     public EtcdRpcResponse<TxnResponse> handleEtcdRpcTxnRequest(TxnRequest request) {
         return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.TXN, request), TxnResponse.class);
+    }
+
+    /**
+     * 处理 COMPACT 请求。
+     *
+     * <p>Compact 边界是全局状态机语义，必须进入 Raft 并在 apply 阶段串行执行。</p>
+     */
+    public EtcdRpcResponse<CompactResponse> handleEtcdRpcCompactRequest(CompactRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.COMPACT, request), CompactResponse.class);
     }
 
     /**

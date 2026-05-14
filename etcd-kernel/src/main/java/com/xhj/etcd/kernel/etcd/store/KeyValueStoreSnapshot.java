@@ -26,6 +26,13 @@ public class KeyValueStoreSnapshot implements Serializable {
     private long revision;
 
     /**
+     * 快照时的 compact revision。
+     *
+     * <p>恢复后历史读会基于该边界拒绝读取已被压缩的旧 revision。</p>
+     */
+    private long compactRevision;
+
+    /**
      * 快照保存的历史记录。
      *
      * <p>结构与运行态 KeyValueStore.historyByKey 保持一致，便于阅读和恢复。</p>

@@ -3,6 +3,8 @@ package com.xhj.etcd.kernel.etcd.network.support;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
@@ -216,5 +218,27 @@ public abstract class EtcdDistributedTestSkeleton
             Thread.sleep(100L);
         }
         throw new AssertionError("txn retry timeout", lastException);
+    }
+
+    protected CompactResponse compactOnLeaderWithRetry(CompactRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<CompactResponse> response = EtcdTestSupport.callCompactByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("compact retry timeout, requestedRevision="
+                + (request == null ? "null" : request.getRevision()), lastException);
     }
 }

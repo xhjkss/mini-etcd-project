@@ -10,7 +10,7 @@ import java.util.TreeMap;
  * KeyValueStore
  *
  * @author XJks
- * @description 当前阶段最小 MVCC KV 状态机，只覆盖 Put/Get/Range/Delete/DeleteRange。
+ * @description 当前阶段最小 MVCC KV 状态机，覆盖 Put/Get/Range/Delete/DeleteRange/Compact。
  *
  * <p>该类不是通用并发容器，设计前提是由 EtcdNode 的 event-loop 串行访问。</p>
  *
@@ -43,10 +43,30 @@ public class KeyValueStore {
     private long currentRevision;
 
     /**
+     * 历史压缩边界 revision。
+     *
+     * <p>
+     * TODO:
+     *  该值表示“已经被 compact 的历史下界”：
+     *  1) requestedRevision < compactRevision 的历史读必须返回 compacted 错误；
+     *  2) compactRevision 只会单调递增，不会回退；
+     *  3) compact 不推进 currentRevision，只改变可读取历史窗口。
+     * </p>
+     */
+    private long compactRevision;
+
+    /**
      * 获取当前状态机 revision。
      */
     public long currentRevision() {
         return currentRevision;
+    }
+
+    /**
+     * 获取当前 compact revision。
+     */
+    public long compactRevision() {
+        return compactRevision;
     }
 
     /**
@@ -254,6 +274,51 @@ public class KeyValueStore {
     }
 
     /**
+     * 压缩指定 revision 及其之前的历史版本。
+     *
+     * <p>
+     * TODO:
+     *  compact 的核心语义是“收缩历史窗口”而不是“产生新写版本”：
+     *  1) compact 不会推进 currentRevision；
+     *  2) compact 后 requestedRevision < compactRevision 的历史读必须报 compacted；
+     *  3) 对每个 key 保留 <= revision 的最后可见版本作为边界（若边界是 tombstone 则该 key 可整体清理）。
+     * </p>
+     *
+     * @param revision 压缩边界 revision
+     * @return 历史记录删除条数
+     */
+    public int compact(long revision) {
+        if (revision <= 0L) {
+            throw new IllegalArgumentException("compact revision must be positive");
+        }
+        if (revision > currentRevision) {
+            throw new IllegalArgumentException("compact revision must not be greater than current revision, revision=" + revision + ", current=" + currentRevision);
+        }
+        if (revision <= compactRevision) {
+            throw new IllegalArgumentException("required revision has been compacted, requested=" + revision + ", compactRevision=" + compactRevision);
+        }
+
+        int removedRecordCount = 0;
+        List<String> keyList = new ArrayList<>(historyByKey.keySet());
+        for (String key : keyList) {
+            List<KeyValueRecord> records = historyByKey.get(key);
+            if (records == null || records.isEmpty()) {
+                continue;
+            }
+            List<KeyValueRecord> compactedRecords = compactRecordsToRevision(records, revision);
+            removedRecordCount += records.size() - compactedRecords.size();
+            if (compactedRecords.isEmpty()) {
+                historyByKey.remove(key);
+            } else {
+                historyByKey.put(key, compactedRecords);
+            }
+        }
+
+        compactRevision = revision;
+        return removedRecordCount;
+    }
+
+    /**
      * 构建状态机快照。
      *
      * <p>快照数据使用与运行态一致的 historyByKey 结构；单 key 历史顺序由写入路径保证。</p>
@@ -262,6 +327,7 @@ public class KeyValueStore {
         // 1) 固定快照 revision，作为恢复后的读边界基线。
         KeyValueStoreSnapshot snapshot = new KeyValueStoreSnapshot();
         snapshot.setRevision(currentRevision);
+        snapshot.setCompactRevision(compactRevision);
 
         // 2) 按 key 深拷贝历史记录，避免运行态对象泄漏到快照对象中。
         for (Map.Entry<String, List<KeyValueRecord>> entry : historyByKey.entrySet()) {
@@ -286,6 +352,7 @@ public class KeyValueStore {
         // 1) 先清空运行态，再做恢复，避免脏数据残留。
         historyByKey.clear();
         currentRevision = 0L;
+        compactRevision = 0L;
         if (snapshot == null) {
             return;
         }
@@ -318,6 +385,7 @@ public class KeyValueStore {
 
         // 3) revision 以快照声明值和历史最大 modRevision 的较大值为准。
         currentRevision = Math.max(snapshot.getRevision(), findMaxRevision());
+        compactRevision = Math.max(0L, snapshot.getCompactRevision());
     }
 
     /**
@@ -337,6 +405,9 @@ public class KeyValueStore {
         }
         if (requestedRevision == 0L) {
             return currentRevision;
+        }
+        if (requestedRevision < compactRevision) {
+            throw new IllegalArgumentException("required revision has been compacted, requested=" + requestedRevision + ", compactRevision=" + compactRevision);
         }
         if (requestedRevision > currentRevision) {
             throw new IllegalArgumentException("requested revision must not be greater than current revision, requested=" + requestedRevision + ", current=" + currentRevision);
@@ -513,6 +584,36 @@ public class KeyValueStore {
             copy.setValue(null);
         }
         return copy;
+    }
+
+    /**
+     * 压缩单 key 历史列表到指定 revision。
+     *
+     * <p>
+     * TODO:
+     *  算法分两段：
+     *  1) 先筛出 > revision 的记录原样保留；
+     *  2) 再从 <= revision 区间取“最后一条记录”作为边界锚点：
+     *     - 边界锚点可见（非 tombstone）时保留；
+     *     - 边界锚点为 tombstone 时，该 key 在压缩边界前已经删除，故不保留锚点。
+     * </p>
+     */
+    private List<KeyValueRecord> compactRecordsToRevision(List<KeyValueRecord> records, long revision) {
+        List<KeyValueRecord> compactedRecords = new ArrayList<>();
+        KeyValueRecord latestRecordBeforeOrAtRevision = null;
+
+        for (KeyValueRecord record : records) {
+            if (record.getModRevision() <= revision) {
+                latestRecordBeforeOrAtRevision = record;
+                continue;
+            }
+            compactedRecords.add(copyRecord(record));
+        }
+
+        if (latestRecordBeforeOrAtRevision != null && !latestRecordBeforeOrAtRevision.isDeleted()) {
+            compactedRecords.add(0, copyRecord(latestRecordBeforeOrAtRevision));
+        }
+        return compactedRecords;
     }
 
     /**

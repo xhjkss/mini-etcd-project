@@ -51,5 +51,12 @@ public enum EtcdEventType {
      *
      * <p>Txn compare 与分支执行必须在 apply 阶段原子执行，因此该事件始终进入 Raft 顺序流。</p>
      */
-    TXN
+    TXN,
+
+    /**
+     * Compact 事件。
+     *
+     * <p>历史压缩边界是全局状态机语义，必须通过 Raft apply 串行推进。</p>
+     */
+    COMPACT
 }
