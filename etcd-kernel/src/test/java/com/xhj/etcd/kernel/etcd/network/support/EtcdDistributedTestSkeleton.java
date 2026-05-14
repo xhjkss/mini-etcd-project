@@ -8,6 +8,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
 import com.xhj.etcd.kernel.testsupport.network.DistributedNetworkTestSkeleton;
 import com.xhj.etcd.rpc.NodeEndpoint;
 
@@ -193,5 +195,26 @@ public abstract class EtcdDistributedTestSkeleton
             Thread.sleep(80L);
         }
         throw new AssertionError("linearizable get retry timeout, key=" + key, lastException);
+    }
+
+    protected TxnResponse txnOnLeaderWithRetry(TxnRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<TxnResponse> response = EtcdTestSupport.callTxnByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("txn retry timeout", lastException);
     }
 }

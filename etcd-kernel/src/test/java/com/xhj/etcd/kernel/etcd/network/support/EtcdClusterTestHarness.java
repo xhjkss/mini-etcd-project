@@ -15,6 +15,7 @@ import com.xhj.etcd.serializer.SerializerRegistry;
 import com.xhj.etcd.storage.Storage;
 import com.xhj.etcd.storage.memory.MemoryStorage;
 
+import java.net.BindException;
 import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -41,6 +42,13 @@ public class EtcdClusterTestHarness implements DistributedClusterHarness {
      * 用于通过 RPC 探测 leader 的只读 key。
      */
     private static final String LEADER_PROBE_KEY = "__leader_probe__";
+
+    /**
+     * 节点重启时 Netty 端口绑定重试次数。
+     *
+     * <p>用于规避 stop -> start 紧邻窗口中的端口释放延迟。</p>
+     */
+    private static final int NODE_SERVER_BIND_RETRY_TIMES = 5;
 
     private final Serializer serializer = SerializerRegistry.getDefaultSerializer();
 
@@ -578,6 +586,27 @@ public class EtcdClusterTestHarness implements DistributedClusterHarness {
             if (running) {
                 return;
             }
+            Exception lastException = null;
+            for (int retryIndex = 0; retryIndex < NODE_SERVER_BIND_RETRY_TIMES; retryIndex++) {
+                try {
+                    startOnce();
+                    running = true;
+                    return;
+                } catch (Exception exception) {
+                    stopQuietlyAfterStartFailure();
+                    if (!isBindException(exception) || retryIndex == NODE_SERVER_BIND_RETRY_TIMES - 1) {
+                        throw exception;
+                    }
+                    lastException = exception;
+                    Thread.sleep(80L * (retryIndex + 1));
+                }
+            }
+            if (lastException != null) {
+                throw lastException;
+            }
+        }
+
+        private void startOnce() throws Exception {
             raftRpcClient = new NettyRpcClient(serializer, RPC_TIMEOUT_MILLIS);
             node = new EtcdNode(nodeId, config, storage, serializer, raftRpcClient);
             server = new NettyRpcServer(endpoint, serializer);
@@ -588,6 +617,7 @@ public class EtcdClusterTestHarness implements DistributedClusterHarness {
                     EtcdNode.HANDLE_ETCD_RPC_DELETE_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_ETCD_RPC_RANGE_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_ETCD_RPC_DELETE_RANGE_REQUEST_METHOD_NAME,
+                    EtcdNode.HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_RAFT_RPC_REQUEST_VOTE_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_RAFT_RPC_REQUEST_VOTE_RESPONSE_METHOD_NAME,
                     EtcdNode.HANDLE_RAFT_RPC_APPEND_ENTRIES_REQUEST_METHOD_NAME,
@@ -596,7 +626,41 @@ public class EtcdClusterTestHarness implements DistributedClusterHarness {
                     EtcdNode.HANDLE_RAFT_RPC_INSTALL_SNAPSHOT_RESPONSE_METHOD_NAME);
             server.start();
             node.start();
-            running = true;
+        }
+
+        private void stopQuietlyAfterStartFailure() {
+            if (node != null) {
+                try {
+                    node.stop();
+                } catch (Exception ignore) {
+                }
+            }
+            if (server != null) {
+                try {
+                    server.stop();
+                } catch (Exception ignore) {
+                }
+            }
+            if (raftRpcClient != null) {
+                try {
+                    raftRpcClient.shutdown();
+                } catch (Exception ignore) {
+                }
+            }
+            node = null;
+            server = null;
+            raftRpcClient = null;
+        }
+
+        private boolean isBindException(Throwable throwable) {
+            Throwable current = throwable;
+            while (current != null) {
+                if (current instanceof BindException) {
+                    return true;
+                }
+                current = current.getCause();
+            }
+            return false;
         }
 
         private void stop() {

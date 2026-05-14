@@ -15,6 +15,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
 import com.xhj.etcd.storage.Storage;
 import com.xhj.etcd.storage.memory.MemoryStorage;
 import org.junit.After;
@@ -101,6 +103,18 @@ public class EtcdNodeRpcSemanticTest {
         request.setStartKey("k-follower-del-range");
         request.setPrefixMatch(true);
         EtcdRpcResponse<DeleteRangeResponse> response = followerNode.handleEtcdRpcDeleteRangeRequest(request);
+
+        assertNotNull(response);
+        assertNotNull(response.getHeader());
+        assertFalse(response.getHeader().isSuccess());
+        assertTrue(response.getHeader().isNotLeader());
+        assertNull(response.getBody());
+    }
+
+    @Test
+    public void shouldRejectTxnOnFollowerWithNotLeaderHeader() {
+        TxnRequest request = new TxnRequest();
+        EtcdRpcResponse<TxnResponse> response = followerNode.handleEtcdRpcTxnRequest(request);
 
         assertNotNull(response);
         assertNotNull(response.getHeader());

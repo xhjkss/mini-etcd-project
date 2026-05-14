@@ -44,5 +44,12 @@ public enum EtcdEventType {
      *
      * <p>写事件，必须转换为 EtcdCommand 并进入 Raft 顺序流。</p>
      */
-    DELETE_RANGE
+    DELETE_RANGE,
+
+    /**
+     * Txn 事件。
+     *
+     * <p>Txn compare 与分支执行必须在 apply 阶段原子执行，因此该事件始终进入 Raft 顺序流。</p>
+     */
+    TXN
 }

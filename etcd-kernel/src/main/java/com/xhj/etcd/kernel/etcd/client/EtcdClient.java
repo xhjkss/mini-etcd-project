@@ -11,6 +11,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
 import com.xhj.etcd.kernel.etcd.node.EtcdNode;
 import com.xhj.etcd.rpc.NodeEndpoint;
 import com.xhj.etcd.rpc.RpcClient;
@@ -130,6 +132,15 @@ public class EtcdClient {
      */
     public DeleteRangeResponse deleteRange(DeleteRangeRequest request) {
         return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_DELETE_RANGE_REQUEST_METHOD_NAME, request, DeleteRangeResponse.class);
+    }
+
+    /**
+     * TXN 操作。
+     *
+     * <p>Txn compare + 分支执行语义必须由 Leader 经 Raft apply 串行执行，因此统一走 Leader 路由。</p>
+     */
+    public TxnResponse txn(TxnRequest request) {
+        return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME, request, TxnResponse.class);
     }
 
     // ==================== RPC 调用工具 ====================

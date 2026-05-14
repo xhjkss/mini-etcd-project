@@ -1,7 +1,6 @@
 package com.xhj.etcd.kernel.etcd.module.node;
 
 import com.xhj.etcd.kernel.etcd.node.EtcdNode;
-
 import com.xhj.etcd.kernel.raft.core.RaftConfig;
 import com.xhj.etcd.kernel.raft.core.RaftRoleType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
@@ -26,7 +25,7 @@ import static org.junit.Assert.assertTrue;
  * EtcdNodeMvccServiceTest
  *
  * @author XJks
- * @description EtcdNode MVCC 上层服务语义测试，聚焦 Range/Get 的请求参数语义。
+ * @description EtcdNode MVCC 上层服务语义测试，聚焦读写参数语义、历史版本读取与范围边界语义。
  */
 public class EtcdNodeMvccServiceTest {
 

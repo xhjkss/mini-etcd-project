@@ -12,6 +12,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
 import com.xhj.etcd.rpc.NodeEndpoint;
 import com.xhj.etcd.rpc.RpcClient;
 
@@ -164,6 +166,22 @@ public final class EtcdTestSupport {
         return client.call(endpoint,
                 EtcdNode.RPC_SERVICE_NAME,
                 EtcdNode.HANDLE_ETCD_RPC_DELETE_RANGE_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 TXN。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  TXN 请求
+     * @return TXN 响应
+     */
+    public static EtcdRpcResponse<TxnResponse> callTxnByRpc(RpcClient client, NodeEndpoint endpoint, TxnRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME,
                 request,
                 EtcdRpcResponse.class);
     }

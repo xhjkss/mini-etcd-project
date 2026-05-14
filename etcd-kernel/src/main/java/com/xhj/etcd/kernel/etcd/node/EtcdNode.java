@@ -28,6 +28,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnCompareOperatorType;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnCompareFieldType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdResponseHeader;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
@@ -37,6 +39,11 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnCompareCondition;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
 import com.xhj.etcd.kernel.etcd.event.EtcdEvent;
 import com.xhj.etcd.kernel.etcd.event.EtcdEventCodec;
 import com.xhj.etcd.kernel.etcd.event.EtcdEventType;
@@ -55,6 +62,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -73,10 +81,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>阶段边界：</p>
  * <ul>
  *     <li>当前实现服务于 MVCC KV 与 Raft / RPC / Storage 联调闭环，不是未来完整 etcd server 基类。</li>
- *     <li>PUT、DELETE_RANGE 一定转换为 EtcdCommand 并进入 Raft propose。</li>
+ *     <li>PUT、DELETE、DELETE_RANGE、TXN 一定转换为 EtcdCommand 并进入 Raft propose。</li>
  *     <li>GET、RANGE 默认线性一致读会进入 Raft，显式非线性一致读或历史 revision 读取则由 etcd-event-loop 本地处理。</li>
+ *     <li>TXN compare + success/failure 分支在一次 apply 中原子执行，失败时回滚到执行前快照。</li>
  *     <li>状态机使用 KeyValueStore 表达，快照数据只保存在 RaftSnapshot.stateMachineData 中。</li>
- *     <li>后续完整 Txn、Lease、Watch、HashKv、Status、SDK、Console 等能力应在独立阶段演进。</li>
+ *     <li>后续 Lease、Watch、HashKv、Status、SDK、Console 等能力应在独立阶段演进。</li>
  * </ul>
  *
  * <p>核心交互流程：</p>
@@ -264,6 +273,8 @@ public class EtcdNode {
 
     public static final String HANDLE_ETCD_RPC_DELETE_RANGE_REQUEST_METHOD_NAME = "handleEtcdRpcDeleteRangeRequest";
 
+    public static final String HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME = "handleEtcdRpcTxnRequest";
+
     public static final String HANDLE_RAFT_RPC_REQUEST_VOTE_REQUEST_METHOD_NAME = "handleRaftRpcRequestVoteRequest";
 
     public static final String HANDLE_RAFT_RPC_REQUEST_VOTE_RESPONSE_METHOD_NAME = "handleRaftRpcRequestVoteResponse";
@@ -423,7 +434,7 @@ public class EtcdNode {
      *
      * <p>处理流程：</p>
      * <p>1) 根据 event.type 取出对应 XxxRequest；</p>
-     * <p>2) PUT / DELETE 必然转换为 EtcdCommand 进入 Raft；</p>
+     * <p>2) PUT / DELETE / DELETE_RANGE / TXN 必然转换为 EtcdCommand 进入 Raft；</p>
      * <p>3) GET / RANGE 根据 linearizableRead 和历史 revision 决定进入 Raft 还是本地读取；</p>
      * <p>4) 本地处理直接完成 event future，Raft 路径则等待 apply 阶段回填。</p>
      *
@@ -446,6 +457,9 @@ public class EtcdNode {
                     return;
                 case DELETE_RANGE:
                     submitEtcdCommandFromEvent(event, EtcdCommandType.DELETE_RANGE, eventCodec.decodeEtcdEventData(event, EtcdEventType.DELETE_RANGE, DeleteRangeRequest.class));
+                    return;
+                case TXN:
+                    submitEtcdCommandFromEvent(event, EtcdCommandType.TXN, eventCodec.decodeEtcdEventData(event, EtcdEventType.TXN, TxnRequest.class));
                     return;
                 default:
                     completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), "unsupported etcd event type: " + event.getType()));
@@ -1169,6 +1183,13 @@ public class EtcdNode {
                     }
                     return EtcdCommandApplyResult.success(command.getCommandId(), applyDeleteRangeRequest(request));
                 }
+                case TXN: {
+                    TxnRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.TXN, TxnRequest.class);
+                    if (request == null) {
+                        return EtcdCommandApplyResult.error(command.getCommandId(), "txn request is null");
+                    }
+                    return EtcdCommandApplyResult.success(command.getCommandId(), applyTxnRequest(request));
+                }
                 default:
                     return EtcdCommandApplyResult.error(command.getCommandId(), "unsupported command type: " + type);
             }
@@ -1284,6 +1305,352 @@ public class EtcdNode {
                     record.getVersion()));
         }
         return DeleteRangeResponse.of(result.getDeletedCount(), result.getRevision(), prevItems);
+    }
+
+    /**
+     * 应用 TXN 请求。
+     *
+     * <p>当前阶段 Txn 语义：</p>
+     * <p>1) compare 先评估，决定 success/failure 分支；</p>
+     * <p>2) 分支内操作顺序执行并收集 TxnOperationResponse；</p>
+     * <p>3) 任一分支操作失败则回滚整个 Txn，不允许部分提交。</p>
+     *
+     * @param request TXN 请求
+     * @return TXN 响应
+     */
+    private TxnResponse applyTxnRequest(TxnRequest request) {
+        validateTxnRequest(request);
+        boolean compareSucceeded = evaluateTxnCompareConditions(request.getCompareConditions());
+        List<TxnOperationRequest> branchOperations = compareSucceeded ? request.getSuccessOperations() : request.getFailureOperations();
+
+        /**
+         * TODO:
+         *  Txn 原子性回滚边界：
+         *  1) 分支执行前先捕获状态机快照；
+         *  2) 分支内任意操作异常都恢复快照；
+         *  3) 保证 Txn 不留下部分写入，符合 compare + branch 的原子提交语义。
+         */
+        KeyValueStoreSnapshot snapshotBeforeTxn = keyValueStore.createSnapshot();
+        List<TxnOperationResponse> responseOps = new ArrayList<>();
+        try {
+            executeTxnBranchOperations(branchOperations, responseOps);
+            return TxnResponse.of(compareSucceeded, keyValueStore.currentRevision(), responseOps);
+        } catch (Exception exception) {
+            keyValueStore.restoreSnapshot(snapshotBeforeTxn);
+            throw exception;
+        }
+    }
+
+    /**
+     * 执行 Txn 分支操作。
+     */
+    private void executeTxnBranchOperations(List<TxnOperationRequest> branchOperations, List<TxnOperationResponse> responseOps) {
+        if (branchOperations == null || branchOperations.isEmpty()) {
+            return;
+        }
+        for (TxnOperationRequest operation : branchOperations) {
+            responseOps.add(executeTxnBranchOperation(operation));
+        }
+    }
+
+    /**
+     * 执行单个 Txn 分支操作并返回 TxnOperationResponse。
+     */
+    private TxnOperationResponse executeTxnBranchOperation(TxnOperationRequest operation) {
+        if (operation == null || operation.getOperationType() == null) {
+            throw new IllegalArgumentException("txn operation must not be null");
+        }
+        switch (operation.getOperationType()) {
+            case PUT: {
+                PutRequest request = requireTxnOperationData(operation, PutRequest.class, "put");
+                return TxnOperationResponse.ofPut(applyPutRequest(request));
+            }
+            case DELETE: {
+                DeleteRequest request = requireTxnOperationData(operation, DeleteRequest.class, "delete");
+                return TxnOperationResponse.ofDelete(applyDeleteRequest(request));
+            }
+            case GET: {
+                GetRequest request = requireTxnOperationData(operation, GetRequest.class, "get");
+                return TxnOperationResponse.ofGet(applyGetRequest(request));
+            }
+            case RANGE: {
+                RangeRequest request = requireTxnOperationData(operation, RangeRequest.class, "range");
+                return TxnOperationResponse.ofRange(applyRangeRequest(request));
+            }
+            case DELETE_RANGE: {
+                DeleteRangeRequest request = requireTxnOperationData(operation, DeleteRangeRequest.class, "delete-range");
+                return TxnOperationResponse.ofDeleteRange(applyDeleteRangeRequest(request));
+            }
+            default:
+                throw new IllegalArgumentException("unsupported txn operation type: " + operation.getOperationType());
+        }
+    }
+
+    /**
+     * 校验 Txn 请求。
+     */
+    private void validateTxnRequest(TxnRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("txn request must not be null");
+        }
+        validateTxnCompareConditions(request.getCompareConditions());
+        validateTxnBranchOperations(request.getSuccessOperations(), "success");
+        validateTxnBranchOperations(request.getFailureOperations(), "failure");
+    }
+
+    /**
+     * 校验 Txn compare 条件。
+     */
+    private void validateTxnCompareConditions(List<TxnCompareCondition> compareConditions) {
+        if (compareConditions == null) {
+            return;
+        }
+        for (TxnCompareCondition compareCondition : compareConditions) {
+            if (compareCondition == null) {
+                throw new IllegalArgumentException("txn compare condition must not be null");
+            }
+            if (compareCondition.getKey() == null || compareCondition.getKey().trim().isEmpty()) {
+                throw new IllegalArgumentException("txn compare key must not be empty");
+            }
+            if (compareCondition.getCompareFieldType() == null) {
+                throw new IllegalArgumentException("txn compare field type must not be null");
+            }
+            if (compareCondition.getCompareOperatorType() == null) {
+                throw new IllegalArgumentException("txn compare operator type must not be null");
+            }
+            validateTxnCompareOperatorType(compareCondition.getCompareOperatorType());
+            validateTxnCompareData(compareCondition);
+        }
+    }
+
+    /**
+     * 校验 Txn compare 运算符类型。
+     */
+    private void validateTxnCompareOperatorType(TxnCompareOperatorType compareOperatorType) {
+        switch (compareOperatorType) {
+            case EQUAL:
+            case NOT_EQUAL:
+            case GREATER:
+            case LESS:
+                return;
+            default:
+                throw new IllegalArgumentException("unsupported compare operator type: " + compareOperatorType);
+        }
+    }
+
+    /**
+     * 校验 Txn compare data 与 fieldType 的匹配关系。
+     */
+    private void validateTxnCompareData(TxnCompareCondition compareCondition) {
+        switch (compareCondition.getCompareFieldType()) {
+            case VALUE:
+                validateTxnCompareValueData(compareCondition);
+                return;
+            case VERSION:
+            case CREATE_REVISION:
+            case MOD_REVISION:
+                validateTxnCompareLongData(compareCondition);
+                return;
+            default:
+                throw new IllegalArgumentException("unsupported compare field type: " + compareCondition.getCompareFieldType());
+        }
+    }
+
+    /**
+     * 校验 VALUE compare 的数据类型与边界。
+     */
+    private void validateTxnCompareValueData(TxnCompareCondition compareCondition) {
+        String expectedValue = compareCondition.dataAs(String.class);
+        if (expectedValue == null
+                && (compareCondition.getCompareOperatorType() == TxnCompareOperatorType.GREATER
+                || compareCondition.getCompareOperatorType() == TxnCompareOperatorType.LESS)) {
+            throw new IllegalArgumentException("txn compare value data must not be null when operator is GREATER or LESS");
+        }
+    }
+
+    /**
+     * 校验 long compare 的数据类型与边界。
+     */
+    private void validateTxnCompareLongData(TxnCompareCondition compareCondition) {
+        Long expectedLongData = compareCondition.dataAs(Long.class);
+        if (expectedLongData == null) {
+            throw new IllegalArgumentException("txn compare long data must not be null, fieldType=" + compareCondition.getCompareFieldType());
+        }
+        if (expectedLongData < 0L) {
+            throw new IllegalArgumentException("txn compare long data must be >= 0, fieldType=" + compareCondition.getCompareFieldType() + ", data=" + expectedLongData);
+        }
+    }
+
+    /**
+     * 校验 Txn 分支操作。
+     */
+    private void validateTxnBranchOperations(List<TxnOperationRequest> operations, String branchName) {
+        if (operations == null) {
+            return;
+        }
+        for (int operationIndex = 0; operationIndex < operations.size(); operationIndex++) {
+            TxnOperationRequest operation = operations.get(operationIndex);
+            if (operation == null || operation.getOperationType() == null) {
+                throw new IllegalArgumentException("txn " + branchName + " operation type must not be null, index=" + operationIndex);
+            }
+            switch (operation.getOperationType()) {
+                case PUT:
+                    if (operation.getData() == null) {
+                        throw new IllegalArgumentException("txn " + branchName + " put request must not be null, index=" + operationIndex);
+                    }
+                    operation.dataAs(PutRequest.class);
+                    break;
+                case DELETE:
+                    if (operation.getData() == null) {
+                        throw new IllegalArgumentException("txn " + branchName + " delete request must not be null, index=" + operationIndex);
+                    }
+                    operation.dataAs(DeleteRequest.class);
+                    break;
+                case GET:
+                    if (operation.getData() == null) {
+                        throw new IllegalArgumentException("txn " + branchName + " get request must not be null, index=" + operationIndex);
+                    }
+                    operation.dataAs(GetRequest.class);
+                    break;
+                case RANGE:
+                    if (operation.getData() == null) {
+                        throw new IllegalArgumentException("txn " + branchName + " range request must not be null, index=" + operationIndex);
+                    }
+                    operation.dataAs(RangeRequest.class);
+                    break;
+                case DELETE_RANGE:
+                    if (operation.getData() == null) {
+                        throw new IllegalArgumentException("txn " + branchName + " delete-range request must not be null, index=" + operationIndex);
+                    }
+                    operation.dataAs(DeleteRangeRequest.class);
+                    break;
+                default:
+                    throw new IllegalArgumentException("unsupported txn operation type: " + operation.getOperationType());
+            }
+        }
+    }
+
+    /**
+     * 按期望类型读取 Txn 操作数据。
+     */
+    private <T> T requireTxnOperationData(TxnOperationRequest operation, Class<T> expectedDataType, String operationName) {
+        T operationData = operation.dataAs(expectedDataType);
+        if (operationData == null) {
+            throw new IllegalArgumentException("txn " + operationName + " request must not be null");
+        }
+        return operationData;
+    }
+
+    /**
+     * 评估 Txn compare 条件列表。
+     */
+    private boolean evaluateTxnCompareConditions(List<TxnCompareCondition> compareConditions) {
+        if (compareConditions == null || compareConditions.isEmpty()) {
+            return true;
+        }
+        for (TxnCompareCondition compareCondition : compareConditions) {
+            if (!evaluateTxnCompareCondition(compareCondition)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 评估单个 compare 条件。
+     */
+    private boolean evaluateTxnCompareCondition(TxnCompareCondition compareCondition) {
+        KeyValueRecord record = keyValueStore.get(compareCondition.getKey(), 0L);
+        TxnCompareFieldType compareFieldType = compareCondition.getCompareFieldType();
+        TxnCompareOperatorType compareOperatorType = compareCondition.getCompareOperatorType();
+
+        switch (compareFieldType) {
+            case VALUE:
+                return compareValueByOperator(
+                        record == null ? null : record.getValue(),
+                        compareCondition.dataAs(String.class),
+                        compareOperatorType);
+            case VERSION:
+                return compareLongByOperator(
+                        record == null ? 0L : record.getVersion(),
+                        requireTxnCompareLongData(compareCondition),
+                        compareOperatorType);
+            case CREATE_REVISION:
+                return compareLongByOperator(
+                        record == null ? 0L : record.getCreateRevision(),
+                        requireTxnCompareLongData(compareCondition),
+                        compareOperatorType);
+            case MOD_REVISION:
+                return compareLongByOperator(
+                        record == null ? 0L : record.getModRevision(),
+                        requireTxnCompareLongData(compareCondition),
+                        compareOperatorType);
+            default:
+                throw new IllegalArgumentException("unsupported compare field type: " + compareFieldType);
+        }
+    }
+
+    /**
+     * 按 long 类型读取 compare 数据。
+     */
+    private long requireTxnCompareLongData(TxnCompareCondition compareCondition) {
+        Long compareLongData = compareCondition.dataAs(Long.class);
+        if (compareLongData == null) {
+            throw new IllegalArgumentException("txn compare long data must not be null, fieldType=" + compareCondition.getCompareFieldType());
+        }
+        return compareLongData;
+    }
+
+    /**
+     * 按 compare 结果比较 long。
+     */
+    private boolean compareLongByOperator(long actualValue, long expectedValue, TxnCompareOperatorType compareOperatorType) {
+        int compareValue = Long.compare(actualValue, expectedValue);
+        return compareByOperator(compareValue, compareOperatorType);
+    }
+
+    /**
+     * 按 compare 结果比较 value。
+     *
+     * <p>GREATER/LESS 要求两侧都非空；否则该 compare 条件判定为 false。</p>
+     */
+    private boolean compareValueByOperator(String actualValue, String expectedValue, TxnCompareOperatorType compareOperatorType) {
+        switch (compareOperatorType) {
+            case EQUAL:
+                return Objects.equals(actualValue, expectedValue);
+            case NOT_EQUAL:
+                return !Objects.equals(actualValue, expectedValue);
+            case GREATER:
+                if (actualValue == null || expectedValue == null) {
+                    return false;
+                }
+                return actualValue.compareTo(expectedValue) > 0;
+            case LESS:
+                if (actualValue == null || expectedValue == null) {
+                    return false;
+                }
+                return actualValue.compareTo(expectedValue) < 0;
+            default:
+                throw new IllegalArgumentException("unsupported compare operator type: " + compareOperatorType);
+        }
+    }
+
+    /**
+     * 根据 compare 运算符解释比较结果。
+     */
+    private boolean compareByOperator(int compareValue, TxnCompareOperatorType compareOperatorType) {
+        switch (compareOperatorType) {
+            case EQUAL:
+                return compareValue == 0;
+            case NOT_EQUAL:
+                return compareValue != 0;
+            case GREATER:
+                return compareValue > 0;
+            case LESS:
+                return compareValue < 0;
+            default:
+                throw new IllegalArgumentException("unsupported compare operator type: " + compareOperatorType);
+        }
     }
 
     /**
@@ -1408,6 +1775,15 @@ public class EtcdNode {
      */
     public EtcdRpcResponse<DeleteRangeResponse> handleEtcdRpcDeleteRangeRequest(DeleteRangeRequest request) {
         return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.DELETE_RANGE, request), DeleteRangeResponse.class);
+    }
+
+    /**
+     * 处理 TXN 请求。
+     *
+     * <p>Txn compare 与分支执行必须在 Raft apply 阶段统一原子执行，因此该请求始终进入 Raft。</p>
+     */
+    public EtcdRpcResponse<TxnResponse> handleEtcdRpcTxnRequest(TxnRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.TXN, request), TxnResponse.class);
     }
 
     /**
