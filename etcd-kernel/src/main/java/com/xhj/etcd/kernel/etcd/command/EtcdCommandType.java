@@ -43,5 +43,20 @@ public enum EtcdCommandType {
     /**
      * 历史压缩。
      */
-    COMPACT;
+    COMPACT,
+
+    /**
+     * Lease 发放。
+     */
+    LEASE_GRANT,
+
+    /**
+     * Lease 续租。
+     */
+    LEASE_KEEP_ALIVE,
+
+    /**
+     * Lease 撤销。
+     */
+    LEASE_REVOKE;
 }

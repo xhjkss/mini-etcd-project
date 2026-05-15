@@ -1,8 +1,8 @@
 package com.xhj.etcd.kernel.etcd.module.store;
 
-import com.xhj.etcd.kernel.etcd.store.KeyValueStore;
-import com.xhj.etcd.kernel.etcd.store.KeyValueRecord;
-import com.xhj.etcd.kernel.etcd.store.KeyValueDeleteResult;
+import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueStore;
+import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueRecord;
+import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueDeleteResult;
 
 import org.junit.Test;
 

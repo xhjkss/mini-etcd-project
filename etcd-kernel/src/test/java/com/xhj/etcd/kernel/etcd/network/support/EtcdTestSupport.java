@@ -10,6 +10,16 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseListRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseListResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
@@ -69,6 +79,28 @@ public final class EtcdTestSupport {
         PutRequest request = new PutRequest();
         request.setKey(key);
         request.setValue(value);
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_PUT_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用带 leaseId 的 PUT。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param key      key
+     * @param value    value
+     * @param leaseId  leaseId
+     * @return PUT 响应
+     */
+    public static EtcdRpcResponse<PutResponse> callPutByRpc(RpcClient client, NodeEndpoint endpoint, String key, String value, long leaseId) {
+        PutRequest request = new PutRequest();
+        request.setKey(key);
+        request.setValue(value);
+        request.setLeaseId(leaseId);
         return client.call(endpoint,
                 EtcdNode.RPC_SERVICE_NAME,
                 EtcdNode.HANDLE_ETCD_RPC_PUT_REQUEST_METHOD_NAME,
@@ -200,6 +232,86 @@ public final class EtcdTestSupport {
         return client.call(endpoint,
                 EtcdNode.RPC_SERVICE_NAME,
                 EtcdNode.HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 LEASE_GRANT。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  LEASE_GRANT 请求
+     * @return LEASE_GRANT 响应
+     */
+    public static EtcdRpcResponse<LeaseGrantResponse> callLeaseGrantByRpc(RpcClient client, NodeEndpoint endpoint, LeaseGrantRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_LEASE_GRANT_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 LEASE_KEEP_ALIVE。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  LEASE_KEEP_ALIVE 请求
+     * @return LEASE_KEEP_ALIVE 响应
+     */
+    public static EtcdRpcResponse<LeaseKeepAliveResponse> callLeaseKeepAliveByRpc(RpcClient client, NodeEndpoint endpoint, LeaseKeepAliveRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_LEASE_KEEP_ALIVE_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 LEASE_REVOKE。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  LEASE_REVOKE 请求
+     * @return LEASE_REVOKE 响应
+     */
+    public static EtcdRpcResponse<LeaseRevokeResponse> callLeaseRevokeByRpc(RpcClient client, NodeEndpoint endpoint, LeaseRevokeRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_LEASE_REVOKE_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 LEASE_TTL。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  LEASE_TTL 请求
+     * @return LEASE_TTL 响应
+     */
+    public static EtcdRpcResponse<LeaseTtlResponse> callLeaseTtlByRpc(RpcClient client, NodeEndpoint endpoint, LeaseTtlRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_LEASE_TTL_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 LEASE_LIST。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  LEASE_LIST 请求
+     * @return LEASE_LIST 响应
+     */
+    public static EtcdRpcResponse<LeaseListResponse> callLeaseListByRpc(RpcClient client, NodeEndpoint endpoint, LeaseListRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_LEASE_LIST_REQUEST_METHOD_NAME,
                 request,
                 EtcdRpcResponse.class);
     }

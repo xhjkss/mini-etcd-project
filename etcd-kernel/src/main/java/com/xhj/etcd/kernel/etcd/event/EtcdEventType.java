@@ -58,5 +58,40 @@ public enum EtcdEventType {
      *
      * <p>历史压缩边界是全局状态机语义，必须通过 Raft apply 串行推进。</p>
      */
-    COMPACT
+    COMPACT,
+
+    /**
+     * LeaseGrant 事件。
+     *
+     * <p>Lease 发放属于写操作，必须通过 Raft apply 串行推进。</p>
+     */
+    LEASE_GRANT,
+
+    /**
+     * LeaseKeepAlive 事件。
+     *
+     * <p>Lease 续租属于写操作，必须通过 Raft apply 串行推进。</p>
+     */
+    LEASE_KEEP_ALIVE,
+
+    /**
+     * LeaseRevoke 事件。
+     *
+     * <p>Lease 撤销会触发 key 删除，必须通过 Raft apply 串行推进。</p>
+     */
+    LEASE_REVOKE,
+
+    /**
+     * LeaseTtl 事件。
+     *
+     * <p>TTL 查询属于只读事件，不进入 Raft；由 etcd-event-loop 统一调度本地读取，保持入口一致。</p>
+     */
+    LEASE_TTL,
+
+    /**
+     * LeaseList 事件。
+     *
+     * <p>List 查询属于只读事件，不进入 Raft；由 etcd-event-loop 统一调度本地读取，保持入口一致。</p>
+     */
+    LEASE_LIST
 }

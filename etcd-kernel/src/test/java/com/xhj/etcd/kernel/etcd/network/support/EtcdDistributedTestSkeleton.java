@@ -7,6 +7,16 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseListRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseListResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
@@ -241,4 +251,110 @@ public abstract class EtcdDistributedTestSkeleton
         throw new AssertionError("compact retry timeout, requestedRevision="
                 + (request == null ? "null" : request.getRevision()), lastException);
     }
+
+    protected LeaseGrantResponse leaseGrantOnLeaderWithRetry(LeaseGrantRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<LeaseGrantResponse> response = EtcdTestSupport.callLeaseGrantByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("lease grant retry timeout", lastException);
+    }
+
+    protected LeaseKeepAliveResponse leaseKeepAliveOnLeaderWithRetry(LeaseKeepAliveRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<LeaseKeepAliveResponse> response = EtcdTestSupport.callLeaseKeepAliveByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("lease keepalive retry timeout", lastException);
+    }
+
+    protected LeaseRevokeResponse leaseRevokeOnLeaderWithRetry(LeaseRevokeRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<LeaseRevokeResponse> response = EtcdTestSupport.callLeaseRevokeByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("lease revoke retry timeout", lastException);
+    }
+
+    protected LeaseTtlResponse leaseTtlOnLeaderWithRetry(LeaseTtlRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<LeaseTtlResponse> response = EtcdTestSupport.callLeaseTtlByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("lease ttl retry timeout", lastException);
+    }
+
+    protected LeaseListResponse leaseListOnLeaderWithRetry(LeaseListRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<LeaseListResponse> response = EtcdTestSupport.callLeaseListByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("lease list retry timeout", lastException);
+    }
 }
+

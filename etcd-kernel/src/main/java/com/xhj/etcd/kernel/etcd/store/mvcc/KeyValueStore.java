@@ -1,4 +1,4 @@
-package com.xhj.etcd.kernel.etcd.store;
+package com.xhj.etcd.kernel.etcd.store.mvcc;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -75,6 +75,20 @@ public class KeyValueStore {
      * <p>每次写入都会推进 revision，并按 MVCC 规则更新 createRevision 和 version。</p>
      */
     public KeyValueRecord put(String key, String value) {
+        return put(key, value, 0L);
+    }
+
+    /**
+     * 写入 key-value，并可选绑定 lease。
+     *
+     * <p>每次写入都会推进 revision，并按 MVCC 规则更新 createRevision 和 version。</p>
+     *
+     * @param key     待写入 key
+     * @param value   待写入 value
+     * @param leaseId 绑定的 leaseId，0 表示不绑定
+     * @return 写入后的可见记录
+     */
+    public KeyValueRecord put(String key, String value, long leaseId) {
         // 1) 先做 key 校验，避免空 key 进入状态机破坏范围语义。
         validateKey(key);
 
@@ -88,6 +102,7 @@ public class KeyValueStore {
         record.setValue(value);
         record.setModRevision(revision);
         record.setDeleted(false);
+        record.setLeaseId(Math.max(0L, leaseId));
 
         if (previousRecord == null) {
             /**
@@ -203,6 +218,35 @@ public class KeyValueStore {
     }
 
     /**
+     * 删除多个指定 key。
+     *
+     * <p>该方法用于 lease revoke / lease expire 场景，保证一组 key 在同一个 revision 内被删除。</p>
+     *
+     * @param keys 待删除 key 列表
+     * @return 删除结果
+     */
+    public KeyValueDeleteResult deleteKeys(List<String> keys) {
+        List<KeyValueRecord> toDelete = new ArrayList<>();
+        if (keys == null || keys.isEmpty()) {
+            KeyValueDeleteResult result = new KeyValueDeleteResult();
+            result.setDeletedCount(0);
+            result.setRevision(currentRevision);
+            return result;
+        }
+
+        List<String> orderedKeys = new ArrayList<>(keys);
+        orderedKeys.sort(String::compareTo);
+        for (String key : orderedKeys) {
+            validateKey(key);
+            KeyValueRecord record = getVisibleRecordByRevision(key, currentRevision);
+            if (record != null) {
+                toDelete.add(record);
+            }
+        }
+        return deleteVisibleRecords(toDelete, false);
+    }
+
+    /**
      * 范围删除。
      *
      * <p>删除语义采用墓碑记录，不直接移除历史，便于历史 revision 读取和后续 compact 演进。</p>
@@ -265,6 +309,35 @@ public class KeyValueStore {
             appendDeletedRecord(previous, revision);
             if (prevKv) {
                 // 4.1) prevKv=true 时回传删除前可见值。
+                result.getPreviousRecords().add(copyVisibleRecord(previous));
+            }
+        }
+        result.setDeletedCount(toDelete.size());
+        result.setRevision(revision);
+        return result;
+    }
+
+    /**
+     * 删除已收集的可见记录列表。
+     *
+     * <p>该方法把 delete / deleteRange / lease revoke 共用的删除逻辑收敛到一个实现。</p>
+     *
+     * @param toDelete 待删除的可见记录
+     * @param prevKv   是否返回删除前记录
+     * @return 删除结果
+     */
+    private KeyValueDeleteResult deleteVisibleRecords(List<KeyValueRecord> toDelete, boolean prevKv) {
+        KeyValueDeleteResult result = new KeyValueDeleteResult();
+        if (toDelete == null || toDelete.isEmpty()) {
+            result.setDeletedCount(0);
+            result.setRevision(currentRevision);
+            return result;
+        }
+
+        long revision = nextRevision();
+        for (KeyValueRecord previous : toDelete) {
+            appendDeletedRecord(previous, revision);
+            if (prevKv) {
                 result.getPreviousRecords().add(copyVisibleRecord(previous));
             }
         }
@@ -478,6 +551,7 @@ public class KeyValueStore {
         record.setModRevision(revision);
         record.setVersion(previousRecord.getVersion() + 1L);
         record.setDeleted(true);
+        record.setLeaseId(previousRecord.getLeaseId());
         appendRecord(record);
     }
 
@@ -664,6 +738,7 @@ public class KeyValueStore {
         target.setModRevision(source.getModRevision());
         target.setVersion(source.getVersion());
         target.setDeleted(source.isDeleted());
+        target.setLeaseId(source.getLeaseId());
         return target;
     }
 }

@@ -38,6 +38,11 @@ public class GetResponse implements Serializable {
     private long version;
 
     /**
+     * 当前 key 绑定的 leaseId。
+     */
+    private long leaseId;
+
+    /**
      * 当前读取使用的 revision。
      */
     private long revision;
@@ -46,12 +51,20 @@ public class GetResponse implements Serializable {
      * 构造包含完整 MVCC 元信息的 GET 响应。
      */
     public static GetResponse of(String value, long createRevision, long modRevision, long version, long revision) {
+        return of(value, createRevision, modRevision, version, revision, 0L);
+    }
+
+    /**
+     * 构造包含完整 MVCC 元信息的 GET 响应。
+     */
+    public static GetResponse of(String value, long createRevision, long modRevision, long version, long revision, long leaseId) {
         GetResponse response = new GetResponse();
         response.value = value;
         response.createRevision = createRevision;
         response.modRevision = modRevision;
         response.version = version;
         response.revision = revision;
+        response.leaseId = leaseId;
         return response;
     }
 

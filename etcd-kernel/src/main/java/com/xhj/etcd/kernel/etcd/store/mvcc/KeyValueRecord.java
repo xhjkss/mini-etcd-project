@@ -1,4 +1,4 @@
-package com.xhj.etcd.kernel.etcd.store;
+package com.xhj.etcd.kernel.etcd.store.mvcc;
 
 import lombok.Data;
 
@@ -16,6 +16,7 @@ import java.io.Serializable;
  *  1) createRevision：当前“存活代（generation）”首次创建时的全局 revision；
  *  2) modRevision：当前这条版本记录写入时的全局 revision；
  *  3) version：当前“存活代”内该 key 的第几次变更（包含删除墓碑版本）。
+ *  4) leaseId：当前 key 绑定的 leaseId，0 表示未绑定 lease。
  *  删除（tombstone）后再次 put 会开启新的存活代，因此 version 会从 1 重新开始，createRevision 也会切换为新代首次写入的 revision。
  * </p>
  */
@@ -59,4 +60,11 @@ public class KeyValueRecord implements Serializable {
      * 删除墓碑标记。
      */
     private boolean deleted;
+
+    /**
+     * 当前 key 绑定的 leaseId。
+     *
+     * <p>0 表示当前 key 未绑定 lease；非 0 表示该 key 会随着对应 lease 到期或 revoke 被删除。</p>
+     */
+    private long leaseId;
 }

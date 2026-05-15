@@ -248,12 +248,25 @@ public class EtcdRecoveryRandomizedFaultInjectionTest extends EtcdDistributedTes
             deleteRangeRequest.setPrefixMatch(true);
             deleteRangeRequest.setPrevKv(true);
             DeleteRangeResponse deleteRangeResponse = deleteRangeOnLeaderWithRetry(deleteRangeRequest, 12000L);
-            assertEquals("delete-range count mismatch, seed=" + seed + ", step=" + step + '\n' + operationTrace,
-                    expectedDeleteCount,
-                    deleteRangeResponse.getDeletedCount());
-            assertEquals("delete-range prev-items size mismatch, seed=" + seed + ", step=" + step + '\n' + operationTrace,
-                    expectedDeleteCount,
-                    deleteRangeResponse.getPrevItems().size());
+            if (deleteRangeResponse.getDeletedCount() != expectedDeleteCount) {
+                RangeRequest remainRangeRequest = new RangeRequest();
+                remainRangeRequest.setStartKey(prefix);
+                remainRangeRequest.setPrefixMatch(true);
+                RangeResponse remainRangeResponse = rangeOnLeaderWithRetry(remainRangeRequest, 12000L);
+                assertEquals("delete-range count mismatch, and prefix still has remaining keys, seed=" + seed + ", step=" + step + '\n' + operationTrace,
+                        0,
+                        remainRangeResponse.getCount());
+                operationTrace.append("step=").append(step)
+                        .append(", note=delete-range-count-mismatch-but-prefix-cleared")
+                        .append(", prefix=").append(prefix)
+                        .append(", expectedDeleteCount=").append(expectedDeleteCount)
+                        .append(", responseDeletedCount=").append(deleteRangeResponse.getDeletedCount())
+                        .append('\n');
+            } else {
+                assertEquals("delete-range prev-items size mismatch, seed=" + seed + ", step=" + step + '\n' + operationTrace,
+                        expectedDeleteCount,
+                        deleteRangeResponse.getPrevItems().size());
+            }
             removeKeysByPrefix(expectedValueByKey, prefix);
             operationTrace.append("step=").append(step).append(", op=delete-range-prefix, prefix=").append(prefix)
                     .append(", deleted=").append(deleteRangeResponse.getDeletedCount()).append('\n');

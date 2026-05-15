@@ -9,6 +9,16 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseListRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseListResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
@@ -143,6 +153,41 @@ public class EtcdClient {
      */
     public CompactResponse compact(CompactRequest request) {
         return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME, request, CompactResponse.class);
+    }
+
+    /**
+     * Lease 发放。
+     */
+    public LeaseGrantResponse leaseGrant(LeaseGrantRequest request) {
+        return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_LEASE_GRANT_REQUEST_METHOD_NAME, request, LeaseGrantResponse.class);
+    }
+
+    /**
+     * Lease 续租。
+     */
+    public LeaseKeepAliveResponse leaseKeepAlive(LeaseKeepAliveRequest request) {
+        return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_LEASE_KEEP_ALIVE_REQUEST_METHOD_NAME, request, LeaseKeepAliveResponse.class);
+    }
+
+    /**
+     * Lease 撤销。
+     */
+    public LeaseRevokeResponse leaseRevoke(LeaseRevokeRequest request) {
+        return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_LEASE_REVOKE_REQUEST_METHOD_NAME, request, LeaseRevokeResponse.class);
+    }
+
+    /**
+     * Lease TTL 查询。
+     */
+    public LeaseTtlResponse leaseTtl(LeaseTtlRequest request) {
+        return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_LEASE_TTL_REQUEST_METHOD_NAME, request, LeaseTtlResponse.class);
+    }
+
+    /**
+     * Lease 列表查询。
+     */
+    public LeaseListResponse leaseList(LeaseListRequest request) {
+        return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_LEASE_LIST_REQUEST_METHOD_NAME, request, LeaseListResponse.class);
     }
 
     /**

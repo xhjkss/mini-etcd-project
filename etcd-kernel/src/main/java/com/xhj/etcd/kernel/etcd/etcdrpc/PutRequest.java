@@ -11,7 +11,7 @@ import java.io.Serializable;
  * @description 当前阶段 MVCC KV 骨架的 PUT 请求，用于提交 key-value 写入。
  *
  * <p>阶段边界：</p>
- * <p>该类只服务于当前 MVCC KV 骨架与 Raft/RPC 联调闭环，只保留 key 和 value。</p>
+ * <p>该类只服务于当前 MVCC KV 骨架与 Raft/RPC 联调闭环，只保留 key、value 和 leaseId。</p>
  *
  * <p>处理流程：</p>
  * <p>1) 客户端构造 PutRequest，并通过 EtcdClient 发送到 EtcdNode；</p>
@@ -34,11 +34,27 @@ public class PutRequest implements Serializable {
      */
     private String value;
 
+    /**
+     * 绑定的 leaseId。
+     *
+     * <p>0 表示当前 key 不绑定 lease；非 0 表示该 key 会随着对应 lease 到期或 revoke 被删除。</p>
+     */
+    private long leaseId;
+
     public PutRequest() {
     }
 
     public PutRequest(String key, String value) {
         this.key = key;
         this.value = value;
+    }
+
+    /**
+     * 构造指定 lease 绑定的 PUT 请求。
+     */
+    public PutRequest(String key, String value, long leaseId) {
+        this.key = key;
+        this.value = value;
+        this.leaseId = leaseId;
     }
 }

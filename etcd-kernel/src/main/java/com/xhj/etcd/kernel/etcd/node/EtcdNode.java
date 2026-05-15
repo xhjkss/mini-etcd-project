@@ -26,6 +26,16 @@ import com.xhj.etcd.kernel.etcd.command.EtcdCommandRegistry;
 import com.xhj.etcd.kernel.etcd.command.EtcdCommandType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseListRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseListResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
@@ -41,6 +51,11 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.store.EtcdStateMachineSnapshot;
+import com.xhj.etcd.kernel.etcd.store.lease.LeaseRecord;
+import com.xhj.etcd.kernel.etcd.store.lease.LeaseStore;
+import com.xhj.etcd.kernel.etcd.store.lease.LeaseStoreSnapshot;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseView;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnCompareCondition;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
@@ -50,10 +65,10 @@ import com.xhj.etcd.kernel.etcd.event.EtcdEvent;
 import com.xhj.etcd.kernel.etcd.event.EtcdEventCodec;
 import com.xhj.etcd.kernel.etcd.event.EtcdEventType;
 import com.xhj.etcd.kernel.etcd.registry.NodeEndpointRegistry;
-import com.xhj.etcd.kernel.etcd.store.KeyValueDeleteResult;
-import com.xhj.etcd.kernel.etcd.store.KeyValueRecord;
-import com.xhj.etcd.kernel.etcd.store.KeyValueStore;
-import com.xhj.etcd.kernel.etcd.store.KeyValueStoreSnapshot;
+import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueDeleteResult;
+import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueRecord;
+import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueStore;
+import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueStoreSnapshot;
 import com.xhj.etcd.rpc.NodeEndpoint;
 import com.xhj.etcd.rpc.RpcClient;
 import com.xhj.etcd.serializer.Serializer;
@@ -69,10 +84,15 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * EtcdNode
@@ -83,11 +103,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>阶段边界：</p>
  * <ul>
  *     <li>当前实现服务于 MVCC KV 与 Raft / RPC / Storage 联调闭环，不是未来完整 etcd server 基类。</li>
- *     <li>PUT、DELETE、DELETE_RANGE、TXN、COMPACT 一定转换为 EtcdCommand 并进入 Raft propose。</li>
+ *     <li>PUT、DELETE、DELETE_RANGE、TXN、COMPACT、LEASE_GRANT、LEASE_KEEP_ALIVE、LEASE_REVOKE 一定转换为 EtcdCommand 并进入 Raft propose。</li>
  *     <li>GET、RANGE 默认线性一致读会进入 Raft，显式非线性一致读或历史 revision 读取则由 etcd-event-loop 本地处理。</li>
  *     <li>TXN compare + success/failure 分支在一次 apply 中原子执行，失败时回滚到执行前快照。</li>
  *     <li>状态机使用 KeyValueStore 表达，快照数据只保存在 RaftSnapshot.stateMachineData 中。</li>
- *     <li>后续 Lease、Watch、HashKv、Status、SDK、Console 等能力应在独立阶段演进。</li>
+ *     <li>后续 Watch、HashKv、Status、SDK、Console 等能力应在独立阶段演进。</li>
  * </ul>
  *
  * <p>核心交互流程：</p>
@@ -137,6 +157,24 @@ public class EtcdNode {
      * 并把 timeout 结果返回给临时客户端。</p>
      */
     private static final long COMMAND_APPLY_TIMEOUT_MILLIS = 10000L;
+
+    /**
+     * Lease 过期扫描间隔，单位：毫秒。
+     */
+    private static final long LEASE_EXPIRY_SCAN_INTERVAL_MILLIS = 200L;
+
+    /**
+     * Lease revoke 并发处理上限。
+     *
+     * <p>参考 etcd 的限流方式，过期扫描本身保持单线程，真正的 revoke 通过有限并发执行，
+     * 避免单个 lease 处理慢时拖住其余 lease 的撤销。</p>
+     */
+    private static final int LEASE_REVOKE_CONCURRENCY = 16;
+
+    /**
+     * Lease revoke 任务队列容量。
+     */
+    private static final int LEASE_REVOKE_TASK_QUEUE_CAPACITY = 64;
 
     // ==================== 基础依赖 ====================
 
@@ -211,6 +249,11 @@ public class EtcdNode {
      */
     private final KeyValueStore keyValueStore = new KeyValueStore();
 
+    /**
+     * Etcd 应用层 Lease 状态机。
+     */
+    private final LeaseStore leaseStore = new LeaseStore();
+
     // ==================== 序列 ====================
 
     /**
@@ -257,6 +300,25 @@ public class EtcdNode {
     private Thread etcdEventLoopThread;
 
     /**
+     * Lease 过期扫描线程。
+     */
+    private Thread leaseExpiryThread;
+
+    /**
+     * 待撤销 lease 去重集合。
+     *
+     * <p>key=leaseId；value 仅作占位，避免重复入队同一个 leaseId。</p>
+     */
+    private final Map<Long, Boolean> pendingLeaseRevokeMap = new ConcurrentHashMap<>();
+
+    /**
+     * Lease revoke 任务执行器。
+     *
+     * <p>扫描线程只负责发现过期 lease，具体 revoke 由该执行器并发处理并受固定并发度限制。</p>
+     */
+    private volatile ExecutorService leaseRevokeExecutor;
+
+    /**
      * Ready 处理失败时统一错误消息前缀。
      */
     private static final String READY_PROCESS_FAILURE_MESSAGE_PREFIX = "raft ready process failed, node will stop for safety, nodeId=";
@@ -278,6 +340,16 @@ public class EtcdNode {
     public static final String HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME = "handleEtcdRpcTxnRequest";
 
     public static final String HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME = "handleEtcdRpcCompactRequest";
+
+    public static final String HANDLE_ETCD_RPC_LEASE_GRANT_REQUEST_METHOD_NAME = "handleEtcdRpcLeaseGrantRequest";
+
+    public static final String HANDLE_ETCD_RPC_LEASE_KEEP_ALIVE_REQUEST_METHOD_NAME = "handleEtcdRpcLeaseKeepAliveRequest";
+
+    public static final String HANDLE_ETCD_RPC_LEASE_REVOKE_REQUEST_METHOD_NAME = "handleEtcdRpcLeaseRevokeRequest";
+
+    public static final String HANDLE_ETCD_RPC_LEASE_TTL_REQUEST_METHOD_NAME = "handleEtcdRpcLeaseTtlRequest";
+
+    public static final String HANDLE_ETCD_RPC_LEASE_LIST_REQUEST_METHOD_NAME = "handleEtcdRpcLeaseListRequest";
 
     public static final String HANDLE_RAFT_RPC_REQUEST_VOTE_REQUEST_METHOD_NAME = "handleRaftRpcRequestVoteRequest";
 
@@ -332,25 +404,37 @@ public class EtcdNode {
     /**
      * 启动 EtcdNode。
      *
-     * <p>启动顺序不能随意调整：</p>
-     * <p>1) 先恢复 Raft 持久状态和状态机快照，保证内存状态与磁盘状态对齐；</p>
-     * <p>2) 再启动 RaftNode 事件循环，使 Raft 可以开始产生 Ready；</p>
-     * <p>3) 最后启动 etcd-event-loop，消费 RaftReady 并完成上层副作用。</p>
+     * <p>启动流程必须按固定顺序执行：</p>
+     * <ol>
+     *     <li>先从 storage 恢复 Raft 持久状态和状态机快照，保证内存态与磁盘态对齐。</li>
+     *     <li>再把 running 置为 true，允许后台循环开始工作。</li>
+     *     <li>启动 RaftNode 事件循环，让 Raft 可以开始产出 Ready。</li>
+     *     <li>初始化 Lease revoke 线程池，为过期 lease 的并发撤销做准备。</li>
+     *     <li>启动 etcd-event-loop，消费用户请求对应的 EtcdEvent 并决定是否进入 Raft。</li>
+     *     <li>最后启动 lease-expiry-loop，周期性扫描已过期 lease 并投递撤销任务。</li>
+     * </ol>
      *
-     * <p>如果先启动事件循环再恢复数据，节点可能在状态未恢复完成时对外处理请求或参与 Raft 消息，
-     * 这会让 MVCC KV 状态机和 Raft 持久边界产生不一致。</p>
+     * <p>这个顺序不能乱：如果先启动事件循环，再恢复持久化数据，节点可能在状态未恢复完成时就开始
+     * 对外收请求、发 Raft 消息或处理过期 lease，最终导致状态机边界和 Raft 持久边界不一致。</p>
      */
     public void start() {
         if (running) {
             return;
         }
 
-        // 1) 先恢复 Raft 持久状态与状态机快照，再启动事件循环，避免重启后先对外服务再补数据。
+        // 1) 先恢复持久状态与状态机快照，避免重启后先对外服务再补数据。
         restoreOnStart();
+
+        // 2) 标记节点进入运行态，允许后续后台循环开始处理任务。
         running = true;
 
+        // 3) 先启动 Raft 事件循环，让底层共识层具备产出 Ready 的能力。
         raftNode.startRaftEventLoop(raftReadyEventQueue);
 
+        // 4) 提前准备 lease revoke 线程池，供过期扫描线程提交并发撤销任务。
+        leaseRevokeExecutor = createLeaseRevokeExecutor();
+
+        // 5) 启动 Etcd 事件循环，统一消费 RPC 请求对应的 EtcdEvent。
         etcdEventLoopThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -359,20 +443,56 @@ public class EtcdNode {
         }, "etcd-event-loop-" + nodeId);
         etcdEventLoopThread.setDaemon(true);
         etcdEventLoopThread.start();
+
+        // 6) 启动过期扫描线程，只负责发现过期 lease，不直接做阻塞 revoke。
+        leaseExpiryThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                runLeaseExpiryLoop();
+            }
+        }, "lease-expiry-loop-" + nodeId);
+        leaseExpiryThread.setDaemon(true);
+        leaseExpiryThread.start();
     }
 
     /**
      * 停止 EtcdNode。
      *
-     * <p>该方法只负责停止事件循环和 RaftNode，不额外提交 Advance。
-     * 如果当前 Ready 正在处理过程中失败，仍应保持未 Advance 语义，等待重启后基于持久化状态恢复。</p>
+     * <p>停止流程按“先拒绝新工作，再中断后台循环，最后清理并发撤销资源”的顺序执行：</p>
+     * <ol>
+     *     <li>先把 running 置为 false，阻止各个后台循环继续接收新任务。</li>
+     *     <li>停止 RaftNode 事件循环，避免底层共识层继续产出新的 Ready。</li>
+     *     <li>中断 etcd-event-loop 和 lease-expiry-loop，让它们尽快退出阻塞轮询。</li>
+     *     <li>关闭 lease revoke 线程池，打断正在执行的过期撤销任务。</li>
+     *     <li>清空待撤销 lease 去重表，避免下次启动时残留旧任务状态。</li>
+     * </ol>
+     *
+     * <p>这里不额外提交 Advance，也不主动补完当前 Ready 的处理结果。
+     * 如果节点是在 Ready 处理中停止，应该保持未 Advance 语义，等待下次启动后基于持久化状态恢复。</p>
      */
     public void stop() {
+        // 1) 先拒绝新工作，所有循环会在下一次轮询时退出。
         running = false;
+
+        // 2) 先停止 Raft 事件循环，避免底层继续产生新的 Ready。
         raftNode.stopRaftEventLoop();
+
+        // 3) 中断上层事件循环和过期扫描线程，缩短退出等待时间。
         if (etcdEventLoopThread != null) {
             etcdEventLoopThread.interrupt();
         }
+        if (leaseExpiryThread != null) {
+            leaseExpiryThread.interrupt();
+        }
+
+        // 4) 关闭 lease revoke 线程池，打断正在进行的过期撤销任务。
+        if (leaseRevokeExecutor != null) {
+            leaseRevokeExecutor.shutdownNow();
+            leaseRevokeExecutor = null;
+        }
+
+        // 5) 清理待撤销 lease 的去重状态，避免重启后沿用旧任务标记。
+        pendingLeaseRevokeMap.clear();
     }
 
     // ==================== EventLoop ====================
@@ -413,6 +533,115 @@ public class EtcdNode {
     }
 
     /**
+     * Lease 过期扫描循环。
+     *
+     * <p>该循环只在 Leader 角色下主动提交过期 revoke，Follower 不负责主动过期处理。</p>
+     */
+    private void runLeaseExpiryLoop() {
+        while (running) {
+            try {
+                if (getRole() == RaftRoleType.LEADER) {
+                    expireLeasesIfNeeded();
+                }
+                Thread.sleep(LEASE_EXPIRY_SCAN_INTERVAL_MILLIS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception ignore) {
+            }
+        }
+    }
+
+    /**
+     * 扫描并并发调度已过期 lease。
+     */
+    private void expireLeasesIfNeeded() {
+        List<Long> expiredLeaseIds = leaseStore.collectExpiredLeaseIds(System.currentTimeMillis());
+        for (Long leaseId : expiredLeaseIds) {
+            submitLeaseRevokeIfNeeded(leaseId);
+        }
+    }
+
+    /**
+     * 提交待撤销 lease 到并发执行器，并做去重。
+     *
+     * @param leaseId leaseId
+     */
+    private void submitLeaseRevokeIfNeeded(Long leaseId) {
+        if (leaseId == null || leaseId <= 0L) {
+            return;
+        }
+        if (pendingLeaseRevokeMap.putIfAbsent(leaseId, Boolean.TRUE) != null) {
+            return;
+        }
+
+        ExecutorService executor = leaseRevokeExecutor;
+        if (executor == null || executor.isShutdown()) {
+            pendingLeaseRevokeMap.remove(leaseId);
+            return;
+        }
+
+        try {
+            executor.execute(new Runnable() {
+                @Override
+                public void run() {
+                    processLeaseRevokeTask(leaseId);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            pendingLeaseRevokeMap.remove(leaseId);
+        }
+    }
+
+    /**
+     * 处理单个待撤销 lease 任务。
+     *
+     * @param leaseId leaseId
+     */
+    private void processLeaseRevokeTask(Long leaseId) {
+        try {
+            if (leaseId == null || leaseId <= 0L) {
+                return;
+            }
+            if (getRole() != RaftRoleType.LEADER) {
+                return;
+            }
+            submitEtcdEventAndWait(EtcdEventType.LEASE_REVOKE, new LeaseRevokeRequest(leaseId));
+        } finally {
+            if (leaseId != null) {
+                pendingLeaseRevokeMap.remove(leaseId);
+            }
+        }
+    }
+
+    /**
+     * 创建 lease revoke 并发执行器。
+     *
+     * <p>该执行器只承载过期 lease revoke，不承担 Raft event-loop 和 etcd-event-loop 的职责。</p>
+     *
+     * @return 线程池
+     */
+    private ExecutorService createLeaseRevokeExecutor() {
+        final AtomicInteger threadSequence = new AtomicInteger(0);
+        ThreadFactory threadFactory = new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable runnable) {
+                Thread thread = new Thread(runnable, "lease-revoke-executor-" + nodeId + "-" + threadSequence.incrementAndGet());
+                thread.setDaemon(true);
+                return thread;
+            }
+        };
+        return new ThreadPoolExecutor(
+                LEASE_REVOKE_CONCURRENCY,
+                LEASE_REVOKE_CONCURRENCY,
+                0L,
+                TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<Runnable>(LEASE_REVOKE_TASK_QUEUE_CAPACITY),
+                threadFactory,
+                new ThreadPoolExecutor.AbortPolicy()
+        );
+    }
+
+    /**
      * 处理单个 RaftReady，并在成功后提交 Advance。
      *
      * <p>
@@ -439,7 +668,7 @@ public class EtcdNode {
      * <p>处理流程：</p>
      * <p>1) 根据 event.type 取出对应 XxxRequest；</p>
      * <p>2) PUT / DELETE / DELETE_RANGE / TXN / COMPACT 必然转换为 EtcdCommand 进入 Raft；</p>
-     * <p>3) GET / RANGE 根据 linearizableRead 和历史 revision 决定进入 Raft 还是本地读取；</p>
+     * <p>3) GET / RANGE / LEASE_TTL / LEASE_LIST 根据语义决定进入 Raft 还是本地读取；</p>
      * <p>4) 本地处理直接完成 event future，Raft 路径则等待 apply 阶段回填。</p>
      *
      * @param event Etcd 内部事件
@@ -467,6 +696,21 @@ public class EtcdNode {
                     return;
                 case COMPACT:
                     submitEtcdCommandFromEvent(event, EtcdCommandType.COMPACT, eventCodec.decodeEtcdEventData(event, EtcdEventType.COMPACT, CompactRequest.class));
+                    return;
+                case LEASE_GRANT:
+                    submitEtcdCommandFromEvent(event, EtcdCommandType.LEASE_GRANT, eventCodec.decodeEtcdEventData(event, EtcdEventType.LEASE_GRANT, LeaseGrantRequest.class));
+                    return;
+                case LEASE_KEEP_ALIVE:
+                    submitEtcdCommandFromEvent(event, EtcdCommandType.LEASE_KEEP_ALIVE, eventCodec.decodeEtcdEventData(event, EtcdEventType.LEASE_KEEP_ALIVE, LeaseKeepAliveRequest.class));
+                    return;
+                case LEASE_REVOKE:
+                    submitEtcdCommandFromEvent(event, EtcdCommandType.LEASE_REVOKE, eventCodec.decodeEtcdEventData(event, EtcdEventType.LEASE_REVOKE, LeaseRevokeRequest.class));
+                    return;
+                case LEASE_TTL:
+                    processLeaseTtlEvent(event);
+                    return;
+                case LEASE_LIST:
+                    processLeaseListEvent(event);
                     return;
                 default:
                     completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), "unsupported etcd event type: " + event.getType()));
@@ -505,6 +749,37 @@ public class EtcdNode {
             return;
         }
         submitEtcdCommandFromEvent(event, EtcdCommandType.RANGE, request);
+    }
+
+    /**
+     * 处理 Lease TTL 事件。
+     *
+     * <p>TTL 查询当前阶段为本地只读能力，不进入 Raft；但入口依旧统一走 EtcdEventQueue，避免 RPC handler 分散处理。</p>
+     */
+    private void processLeaseTtlEvent(EtcdEvent event) {
+        LeaseTtlRequest request = eventCodec.decodeEtcdEventData(event, EtcdEventType.LEASE_TTL, LeaseTtlRequest.class);
+        if (request == null) {
+            completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), "lease ttl request must not be null"));
+            return;
+        }
+
+        LeaseTtlResponse response = readLeaseTtlRequest(request);
+        if (response == null) {
+            completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), "lease not found, leaseId=" + request.getLeaseId()));
+            return;
+        }
+        completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.success(event.getEventId(), response));
+    }
+
+    /**
+     * 处理 LeaseList 事件。
+     *
+     * <p>List 查询当前阶段为本地只读能力，不进入 Raft；由 event-loop 统一执行，保持调度风格一致。</p>
+     */
+    private void processLeaseListEvent(EtcdEvent event) {
+        LeaseListRequest request = eventCodec.decodeEtcdEventData(event, EtcdEventType.LEASE_LIST, LeaseListRequest.class);
+        LeaseListResponse response = readLeaseListRequest(request);
+        completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.success(event.getEventId(), response));
     }
 
     /**
@@ -732,11 +1007,11 @@ public class EtcdNode {
             throw new IllegalStateException("raft snapshot stateMachineData must not be null");
         }
 
-        KeyValueStoreSnapshot snapshot = decodeSnapshotData(stateMachineData);
+        EtcdStateMachineSnapshot snapshot = decodeSnapshotData(stateMachineData);
         if (snapshot == null) {
             throw new IllegalStateException("raft snapshot stateMachineData decode failed");
         }
-        keyValueStore.restoreSnapshot(snapshot);
+        restoreEtcdStateMachineSnapshot(snapshot);
         lastAppliedRaftLogIndex = Math.max(lastAppliedRaftLogIndex, lastIncludedIndex);
     }
 
@@ -771,17 +1046,17 @@ public class EtcdNode {
     /**
      * 解码状态机快照。
      *
-     * <p>当前阶段状态机快照序列化前的结构是 KeyValueStoreSnapshot。
+     * <p>当前阶段状态机快照序列化前的结构是 EtcdStateMachineSnapshot。
      * 由于反序列化时需要按照该类型整体恢复，因此这里直接以该对象为边界，避免错误快照数据
      * 被恢复进运行态 KeyValueStore。</p>
      *
      * <p>返回 null 表示快照格式不符合当前阶段 MVCC KV 状态机约定，由调用方决定是否忽略或启动失败。</p>
      *
      * @param snapshotData 状态机快照字节
-     * @return 解码后的快照 Map；格式错误时返回 null
+     * @return 解码后的状态机快照；格式错误时返回 null
      */
-    private KeyValueStoreSnapshot decodeSnapshotData(byte[] snapshotData) {
-        return serializer.deserialize(snapshotData, KeyValueStoreSnapshot.class);
+    private EtcdStateMachineSnapshot decodeSnapshotData(byte[] snapshotData) {
+        return serializer.deserialize(snapshotData, EtcdStateMachineSnapshot.class);
     }
 
     /**
@@ -1204,6 +1479,27 @@ public class EtcdNode {
                     }
                     return EtcdCommandApplyResult.success(command.getCommandId(), applyCompactRequest(request));
                 }
+                case LEASE_GRANT: {
+                    LeaseGrantRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.LEASE_GRANT, LeaseGrantRequest.class);
+                    if (request == null) {
+                        return EtcdCommandApplyResult.error(command.getCommandId(), "lease grant request is null");
+                    }
+                    return EtcdCommandApplyResult.success(command.getCommandId(), applyLeaseGrantRequest(request));
+                }
+                case LEASE_KEEP_ALIVE: {
+                    LeaseKeepAliveRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.LEASE_KEEP_ALIVE, LeaseKeepAliveRequest.class);
+                    if (request == null) {
+                        return EtcdCommandApplyResult.error(command.getCommandId(), "lease keepalive request is null");
+                    }
+                    return EtcdCommandApplyResult.success(command.getCommandId(), applyLeaseKeepAliveRequest(request));
+                }
+                case LEASE_REVOKE: {
+                    LeaseRevokeRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.LEASE_REVOKE, LeaseRevokeRequest.class);
+                    if (request == null) {
+                        return EtcdCommandApplyResult.error(command.getCommandId(), "lease revoke request is null");
+                    }
+                    return EtcdCommandApplyResult.success(command.getCommandId(), applyLeaseRevokeRequest(request));
+                }
                 default:
                     return EtcdCommandApplyResult.error(command.getCommandId(), "unsupported command type: " + type);
             }
@@ -1220,8 +1516,19 @@ public class EtcdNode {
      * @param request PUT 请求
      */
     private PutResponse applyPutRequest(PutRequest request) {
-        KeyValueRecord record = keyValueStore.put(request.getKey(), request.getValue());
-        return PutResponse.of(record.getModRevision());
+        KeyValueStoreSnapshot keyValueStoreSnapshotBeforePut = keyValueStore.createSnapshot();
+        LeaseStoreSnapshot leaseStoreSnapshotBeforePut = leaseStore.createSnapshot();
+        KeyValueRecord previousRecord = keyValueStore.get(request.getKey(), 0L);
+        try {
+            KeyValueRecord record = keyValueStore.put(request.getKey(), request.getValue(), request.getLeaseId());
+            detachLeaseBindingIfNeeded(previousRecord);
+            attachLeaseBindingIfNeeded(request.getKey(), request.getLeaseId());
+            return PutResponse.of(record.getModRevision());
+        } catch (Exception exception) {
+            keyValueStore.restoreSnapshot(keyValueStoreSnapshotBeforePut);
+            leaseStore.restoreSnapshot(leaseStoreSnapshotBeforePut);
+            throw exception;
+        }
     }
 
     /**
@@ -1232,6 +1539,7 @@ public class EtcdNode {
      */
     private DeleteResponse applyDeleteRequest(DeleteRequest request) {
         KeyValueDeleteResult result = keyValueStore.delete(request.getKey());
+        detachLeaseBindings(result.getPreviousRecords());
         return DeleteResponse.of(result.getDeletedCount(), result.getRevision());
     }
 
@@ -1255,7 +1563,8 @@ public class EtcdNode {
                 record.getCreateRevision(),
                 record.getModRevision(),
                 record.getVersion(),
-                effectiveRevision);
+                effectiveRevision,
+                record.getLeaseId());
     }
 
     /**
@@ -1295,7 +1604,8 @@ public class EtcdNode {
                         record.getValue(),
                         record.getCreateRevision(),
                         record.getModRevision(),
-                        record.getVersion()));
+                        record.getVersion(),
+                        record.getLeaseId()));
             }
             matchedCount = items.size();
         }
@@ -1316,9 +1626,50 @@ public class EtcdNode {
                     record.getValue(),
                     record.getCreateRevision(),
                     record.getModRevision(),
-                    record.getVersion()));
+                    record.getVersion(),
+                    record.getLeaseId()));
         }
+        detachLeaseBindings(result.getPreviousRecords());
         return DeleteRangeResponse.of(result.getDeletedCount(), result.getRevision(), prevItems);
+    }
+
+    /**
+     * 按记录列表解绑 lease。
+     *
+     * @param records 记录列表
+     */
+    private void detachLeaseBindings(List<KeyValueRecord> records) {
+        if (records == null || records.isEmpty()) {
+            return;
+        }
+        for (KeyValueRecord record : records) {
+            detachLeaseBindingIfNeeded(record);
+        }
+    }
+
+    /**
+     * 解绑单条记录对应的 lease。
+     *
+     * @param record KV 记录
+     */
+    private void detachLeaseBindingIfNeeded(KeyValueRecord record) {
+        if (record == null || record.getLeaseId() <= 0L || record.getKey() == null || record.getKey().trim().isEmpty()) {
+            return;
+        }
+        leaseStore.detachKey(record.getLeaseId(), record.getKey());
+    }
+
+    /**
+     * 绑定 key 到 lease。
+     *
+     * @param key     key
+     * @param leaseId leaseId
+     */
+    private void attachLeaseBindingIfNeeded(String key, long leaseId) {
+        if (leaseId <= 0L) {
+            return;
+        }
+        leaseStore.attachKey(leaseId, key);
     }
 
     /**
@@ -1329,6 +1680,82 @@ public class EtcdNode {
     private CompactResponse applyCompactRequest(CompactRequest request) {
         keyValueStore.compact(request.getRevision());
         return CompactResponse.of(keyValueStore.compactRevision(), keyValueStore.currentRevision());
+    }
+
+    /**
+     * 应用 LeaseGrant 请求。
+     *
+     * @param request LeaseGrant 请求
+     * @return LeaseGrant 响应
+     */
+    private LeaseGrantResponse applyLeaseGrantRequest(LeaseGrantRequest request) {
+        long requestedLeaseId = request.getLeaseId();
+        long leaseId = requestedLeaseId > 0L ? requestedLeaseId : 0L;
+        long nowMillis = System.currentTimeMillis();
+        LeaseRecord leaseRecord = leaseStore.grant(leaseId, request.getTtlSeconds(), nowMillis);
+        return LeaseGrantResponse.of(LeaseView.of(leaseRecord, nowMillis));
+    }
+
+    /**
+     * 应用 LeaseKeepAlive 请求。
+     *
+     * @param request LeaseKeepAlive 请求
+     * @return LeaseKeepAlive 响应
+     */
+    private LeaseKeepAliveResponse applyLeaseKeepAliveRequest(LeaseKeepAliveRequest request) {
+        long nowMillis = System.currentTimeMillis();
+        LeaseRecord leaseRecord = leaseStore.keepAlive(request.getLeaseId(), nowMillis);
+        return LeaseKeepAliveResponse.of(LeaseView.of(leaseRecord, nowMillis));
+    }
+
+    /**
+     * 应用 LeaseRevoke 请求。
+     *
+     * <p>撤销 lease 时先删除 lease 记录，再按绑定 key 批量删除 KV，确保 lease revoke 与 key 删除处于同一条 apply 顺序流。</p>
+     *
+     * @param request LeaseRevoke 请求
+     * @return LeaseRevoke 响应
+     */
+    private LeaseRevokeResponse applyLeaseRevokeRequest(LeaseRevokeRequest request) {
+        LeaseRecord leaseRecord = leaseStore.revoke(request.getLeaseId());
+        if (leaseRecord == null) {
+            return LeaseRevokeResponse.of(request.getLeaseId(), 0, keyValueStore.currentRevision());
+        }
+
+        List<String> keysToDelete = new ArrayList<>(leaseRecord.getKeys());
+        KeyValueDeleteResult deleteResult = keyValueStore.deleteKeys(keysToDelete);
+        detachLeaseBindings(deleteResult.getPreviousRecords());
+        return LeaseRevokeResponse.of(leaseRecord.getLeaseId(), deleteResult.getDeletedCount(), deleteResult.getRevision());
+    }
+
+    /**
+     * 查询 Lease TTL。
+     *
+     * @param request LeaseTtl 请求
+     * @return LeaseTtl 响应
+     */
+    private LeaseTtlResponse readLeaseTtlRequest(LeaseTtlRequest request) {
+        long nowMillis = System.currentTimeMillis();
+        LeaseRecord leaseRecord = leaseStore.ttl(request.getLeaseId(), nowMillis);
+        if (leaseRecord == null) {
+            return null;
+        }
+        return LeaseTtlResponse.of(LeaseView.of(leaseRecord, nowMillis));
+    }
+
+    /**
+     * 查询 Lease 列表。
+     *
+     * @param request LeaseList 请求
+     * @return LeaseList 响应
+     */
+    private LeaseListResponse readLeaseListRequest(LeaseListRequest request) {
+        long nowMillis = System.currentTimeMillis();
+        List<LeaseView> leaseViews = new ArrayList<>();
+        for (LeaseRecord leaseRecord : leaseStore.list(nowMillis)) {
+            leaseViews.add(LeaseView.of(leaseRecord, nowMillis));
+        }
+        return LeaseListResponse.of(leaseViews);
     }
 
     /**
@@ -1707,8 +2134,24 @@ public class EtcdNode {
      *
      * @return 可序列化的状态机快照数据
      */
-    private KeyValueStoreSnapshot buildSnapshotStateMachineData() {
-        return keyValueStore.createSnapshot();
+    private EtcdStateMachineSnapshot buildSnapshotStateMachineData() {
+        EtcdStateMachineSnapshot snapshot = new EtcdStateMachineSnapshot();
+        snapshot.setKeyValueStoreSnapshot(keyValueStore.createSnapshot());
+        snapshot.setLeaseStoreSnapshot(leaseStore.createSnapshot());
+        return snapshot;
+    }
+
+    /**
+     * 恢复 Etcd 状态机快照。
+     *
+     * @param snapshot 状态机快照
+     */
+    private void restoreEtcdStateMachineSnapshot(EtcdStateMachineSnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        keyValueStore.restoreSnapshot(snapshot.getKeyValueStoreSnapshot());
+        leaseStore.restoreSnapshot(snapshot.getLeaseStoreSnapshot());
     }
 
     // ==================== EtcdEvent 提交与等待 ====================
@@ -1817,6 +2260,48 @@ public class EtcdNode {
      */
     public EtcdRpcResponse<CompactResponse> handleEtcdRpcCompactRequest(CompactRequest request) {
         return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.COMPACT, request), CompactResponse.class);
+    }
+
+    /**
+     * 处理 LeaseGrant 请求。
+     *
+     * <p>Lease 发放属于写请求，必须进入 Raft。LeaseId 为 0 时由 Leader 先分配，再把分配结果写入日志。</p>
+     */
+    public EtcdRpcResponse<LeaseGrantResponse> handleEtcdRpcLeaseGrantRequest(LeaseGrantRequest request) {
+        if (request == null) {
+            return EtcdRpcResponse.of(EtcdResponseHeader.error("lease grant request must not be null"), null);
+        }
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.LEASE_GRANT, request), LeaseGrantResponse.class);
+    }
+
+    /**
+     * 处理 LeaseKeepAlive 请求。
+     */
+    public EtcdRpcResponse<LeaseKeepAliveResponse> handleEtcdRpcLeaseKeepAliveRequest(LeaseKeepAliveRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.LEASE_KEEP_ALIVE, request), LeaseKeepAliveResponse.class);
+    }
+
+    /**
+     * 处理 LeaseRevoke 请求。
+     */
+    public EtcdRpcResponse<LeaseRevokeResponse> handleEtcdRpcLeaseRevokeRequest(LeaseRevokeRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.LEASE_REVOKE, request), LeaseRevokeResponse.class);
+    }
+
+    /**
+     * 处理 Lease TTL 查询请求。
+     *
+     * <p>TTL 查询只读当前节点本地 Lease 状态，客户端应通过 Leader 路由获取最新视图。</p>
+     */
+    public EtcdRpcResponse<LeaseTtlResponse> handleEtcdRpcLeaseTtlRequest(LeaseTtlRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.LEASE_TTL, request), LeaseTtlResponse.class);
+    }
+
+    /**
+     * 处理 Lease 列表查询请求。
+     */
+    public EtcdRpcResponse<LeaseListResponse> handleEtcdRpcLeaseListRequest(LeaseListRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.LEASE_LIST, request), LeaseListResponse.class);
     }
 
     /**
