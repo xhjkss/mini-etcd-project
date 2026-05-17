@@ -1,9 +1,9 @@
-package com.xhj.etcd.kernel.etcd.client;
+package com.xhj.etcd.sdk.client;
 
-import com.xhj.etcd.kernel.etcd.client.watch.WatchHandle;
-import com.xhj.etcd.kernel.etcd.client.watch.WatchListener;
-import com.xhj.etcd.kernel.etcd.client.watch.WatchSubscription;
-import com.xhj.etcd.kernel.etcd.client.watch.WatchSubscriptionRegistry;
+import com.xhj.etcd.sdk.client.watch.WatchHandle;
+import com.xhj.etcd.sdk.client.watch.WatchListener;
+import com.xhj.etcd.sdk.client.watch.WatchSubscription;
+import com.xhj.etcd.sdk.client.watch.WatchSubscriptionRegistry;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
@@ -38,6 +38,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeResponse;
 import com.xhj.etcd.kernel.etcd.node.EtcdNode;
 import com.xhj.etcd.rpc.NodeEndpoint;
 import com.xhj.etcd.rpc.RpcClient;
+import com.xhj.etcd.rpc.netty.NettyRpcClient;
+import com.xhj.etcd.serializer.SerializerRegistry;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -50,9 +52,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * EtcdClient
  *
  * @author XJks
- * @description 当前阶段 Etcd 客户端，覆盖 MVCC KV、Txn、Compact 和诊断类 API。
+ * @description mini-etcd 客户端，提供基础 KV/Txn/Compact/Lease/Watch 请求能力。
  */
-public class EtcdClient {
+public class EtcdClient implements AutoCloseable {
 
     /**
      * Watch 创建握手超时时间，单位：毫秒。
@@ -75,6 +77,11 @@ public class EtcdClient {
      * RPC 客户端。
      */
     private final RpcClient rpcClient;
+
+    /**
+     * 是否由当前客户端持有并负责关闭 rpcClient。
+     */
+    private final boolean ownRpcClient;
 
     /**
      * 客户端已知的节点地址表。
@@ -105,7 +112,7 @@ public class EtcdClient {
      * 使用单节点地址构造客户端。
      */
     public EtcdClient(RpcClient rpcClient, NodeEndpoint endpoint) {
-        this(rpcClient, singletonEndpointList(endpoint));
+        this(rpcClient, singletonEndpointList(endpoint), false);
     }
 
     /**
@@ -114,6 +121,17 @@ public class EtcdClient {
      * <p>客户端会先登记 endpointMap，再默认使用第一个地址作为初始 currentEndpoint。</p>
      */
     public EtcdClient(RpcClient rpcClient, List<NodeEndpoint> endpoints) {
+        this(rpcClient, endpoints, false);
+    }
+
+    /**
+     * 使用默认 NettyRpcClient 构造客户端。
+     */
+    public EtcdClient(List<NodeEndpoint> endpoints) {
+        this(new NettyRpcClient(SerializerRegistry.getDefaultSerializer(), 5000L), endpoints, true);
+    }
+
+    EtcdClient(RpcClient rpcClient, List<NodeEndpoint> endpoints, boolean ownRpcClient) {
         if (rpcClient == null) {
             throw new IllegalArgumentException("rpcClient must not be null");
         }
@@ -122,6 +140,7 @@ public class EtcdClient {
         }
 
         this.rpcClient = rpcClient;
+        this.ownRpcClient = ownRpcClient;
         for (NodeEndpoint endpoint : endpoints) {
             registerClientEndpoint(endpoint);
         }
@@ -134,6 +153,13 @@ public class EtcdClient {
      */
     public NodeEndpoint getCurrentEndpoint() {
         return currentEndpoint;
+    }
+
+    @Override
+    public void close() {
+        if (ownRpcClient) {
+            rpcClient.shutdown();
+        }
     }
 
     // ==================== KV 操作 ====================

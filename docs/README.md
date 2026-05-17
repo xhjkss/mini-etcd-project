@@ -24,3 +24,6 @@
 
 7. `architecture-07-diagnostic.md`
 - KvStateHash 与 NodeStatus 诊断读、字段含义、事件链路与节点运行态说明。
+
+8. `architecture-08-sdk.md`
+- mini-etcd 单类客户端 `EtcdClient` 的接口、路由行为、watch 订阅与资源关闭语义说明。

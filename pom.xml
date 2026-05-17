@@ -13,6 +13,7 @@
         <module>etcd-storage</module>
         <module>etcd-rpc</module>
         <module>etcd-kernel</module>
+        <module>etcd-sdk</module>
     </modules>
 
     <properties>

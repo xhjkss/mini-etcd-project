@@ -1,4 +1,4 @@
-package com.xhj.etcd.kernel.etcd.client.watch;
+package com.xhj.etcd.sdk.client.watch;
 
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelRequest;
