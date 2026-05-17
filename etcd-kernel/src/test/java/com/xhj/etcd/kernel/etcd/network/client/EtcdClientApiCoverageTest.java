@@ -1,6 +1,8 @@
 package com.xhj.etcd.kernel.etcd.network.client;
 
 import com.xhj.etcd.kernel.etcd.client.EtcdClient;
+import com.xhj.etcd.kernel.etcd.client.watch.WatchHandle;
+import com.xhj.etcd.kernel.etcd.client.watch.WatchListener;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
@@ -30,6 +32,13 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchEventType;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchEventView;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchNotification;
 import com.xhj.etcd.kernel.etcd.network.support.EtcdDistributedTestSkeleton;
 import com.xhj.etcd.kernel.etcd.network.support.EtcdTestSupport;
 import com.xhj.etcd.rpc.NodeEndpoint;
@@ -37,6 +46,9 @@ import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -235,6 +247,44 @@ public class EtcdClientApiCoverageTest extends EtcdDistributedTestSkeleton {
         assertEquals(0, emptyLeaseListResponse.getLeases().size());
     }
 
+    @Test
+    public void shouldCoverWatchApisThroughClientFacade() throws Exception {
+        String leaderId = startClusterAndAwaitLeader(3, DEFAULT_BOUNDARY_TIMEOUT_MILLIS);
+        EtcdClient client = new EtcdClient(harness.getTestClient(), buildClientEndpoints(chooseFollowerId(leaderId)));
+
+        client.put(new PutRequest("client/watch/key/a", "v1"));
+        client.put(new PutRequest("client/watch/key/b", "v2"));
+        harness.awaitValueReplicated("client/watch/key/a", "v1", harness.quorumSize(), 12000L);
+        harness.awaitValueReplicated("client/watch/key/b", "v2", harness.quorumSize(), 12000L);
+
+        WatchSubscribeRequest subscribeRequest = new WatchSubscribeRequest();
+        subscribeRequest.setStartKey("client/watch/key/");
+        subscribeRequest.setPrefixMatch(true);
+        subscribeRequest.setStartRevision(1L);
+        ClientWatchListener listener = new ClientWatchListener();
+        WatchHandle streamHandle = client.watch(subscribeRequest, listener);
+        assertTrue(listener.awaitSubscribed(5000L));
+        WatchSubscribeResponse subscribeResponse = listener.getSubscribeResponse();
+        assertNotNull(subscribeResponse);
+        assertTrue(subscribeResponse.getWatchId() > 0L);
+        assertTrue(subscribeResponse.getEvents().size() >= 2);
+
+        client.put(new PutRequest("client/watch/key/c", "v3"));
+        client.delete(new DeleteRequest("client/watch/key/a"));
+
+        EtcdTestSupport.awaitTrue(() -> containsWatchEvent(listener.getEvents(), "client/watch/key/c", WatchEventType.PUT)
+                        && containsWatchEvent(listener.getEvents(), "client/watch/key/a", WatchEventType.DELETE),
+                8000L,
+                "watch notification incremental events not received");
+
+        streamHandle.cancel();
+        assertTrue(listener.awaitCanceled(5000L));
+        WatchCancelResponse cancelResponse = listener.getCancelResponse();
+        assertNotNull(cancelResponse);
+        assertTrue(cancelResponse.isCanceled());
+        assertTrue(streamHandle.isClosed());
+    }
+
     private List<NodeEndpoint> buildClientEndpoints(String firstNodeId) {
         List<NodeEndpoint> endpoints = new ArrayList<>();
         endpoints.add(requireEndpoint(firstNodeId));
@@ -244,5 +294,85 @@ public class EtcdClientApiCoverageTest extends EtcdDistributedTestSkeleton {
             }
         }
         return endpoints;
+    }
+
+    private boolean containsWatchEvent(List<WatchEventView> events, String key, WatchEventType eventType) {
+        if (events == null) {
+            return false;
+        }
+        for (WatchEventView event : events) {
+            if (event == null || event.getKeyValue() == null) {
+                continue;
+            }
+            if (key.equals(event.getKeyValue().getKey()) && eventType == event.getEventType()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * ClientWatchListener
+     *
+     * @author XJks
+     * @description EtcdClient watch API 覆盖测试使用的监听器。
+     */
+    private static class ClientWatchListener implements WatchListener {
+
+        private final CountDownLatch subscribedLatch = new CountDownLatch(1);
+
+        private final CountDownLatch canceledLatch = new CountDownLatch(1);
+
+        private final List<WatchEventView> events = new CopyOnWriteArrayList<>();
+
+        private volatile WatchSubscribeResponse subscribeResponse;
+
+        private volatile WatchCancelResponse cancelResponse;
+
+        @Override
+        public void onSubscribed(WatchSubscribeResponse response) {
+            subscribeResponse = response;
+            subscribedLatch.countDown();
+        }
+
+        @Override
+        public void onNotification(WatchNotification response) {
+            if (response != null && response.getEvents() != null) {
+                events.addAll(response.getEvents());
+            }
+            if (response != null && response.isCanceled()) {
+                canceledLatch.countDown();
+            }
+        }
+
+        @Override
+        public void onCanceled(WatchCancelResponse response) {
+            cancelResponse = response;
+            canceledLatch.countDown();
+        }
+
+        @Override
+        public void onError(Throwable cause) {
+        }
+
+        private boolean awaitSubscribed(long timeoutMillis) throws InterruptedException {
+            return subscribedLatch.await(timeoutMillis, TimeUnit.MILLISECONDS);
+        }
+
+        private boolean awaitCanceled(long timeoutMillis) throws InterruptedException {
+            return canceledLatch.await(timeoutMillis, TimeUnit.MILLISECONDS);
+        }
+
+        private WatchSubscribeResponse getSubscribeResponse() {
+            return subscribeResponse;
+        }
+
+        private WatchCancelResponse getCancelResponse() {
+            return cancelResponse;
+        }
+
+        private List<WatchEventView> getEvents() {
+            return events;
+        }
     }
 }

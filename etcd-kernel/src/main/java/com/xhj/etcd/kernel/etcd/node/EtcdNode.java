@@ -36,6 +36,13 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchEventType;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchEventView;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchNotification;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
@@ -69,11 +76,16 @@ import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueDeleteResult;
 import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueRecord;
 import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueStore;
 import com.xhj.etcd.kernel.etcd.store.mvcc.KeyValueStoreSnapshot;
+import com.xhj.etcd.kernel.etcd.store.watch.WatchStore;
+import com.xhj.etcd.kernel.etcd.store.watch.WatchSession;
 import com.xhj.etcd.rpc.NodeEndpoint;
 import com.xhj.etcd.rpc.RpcClient;
+import com.xhj.etcd.rpc.RpcMessage;
+import com.xhj.etcd.rpc.RpcMessageType;
 import com.xhj.etcd.serializer.Serializer;
 import com.xhj.etcd.serializer.SerializerRegistry;
 import com.xhj.etcd.storage.Storage;
+import io.netty.channel.Channel;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -107,7 +119,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *     <li>GET、RANGE 默认线性一致读会进入 Raft，显式非线性一致读或历史 revision 读取则由 etcd-event-loop 本地处理。</li>
  *     <li>TXN compare + success/failure 分支在一次 apply 中原子执行，失败时回滚到执行前快照。</li>
  *     <li>状态机使用 KeyValueStore 表达，快照数据只保存在 RaftSnapshot.stateMachineData 中。</li>
- *     <li>后续 Watch、HashKv、Status、SDK、Console 等能力应在独立阶段演进。</li>
+ *     <li>后续 HashKv、Status、SDK、Console 等能力应在独立阶段演进。</li>
  * </ul>
  *
  * <p>核心交互流程：</p>
@@ -254,6 +266,11 @@ public class EtcdNode {
      */
     private final LeaseStore leaseStore = new LeaseStore();
 
+    /**
+     * Etcd Watch 会话状态机。
+     */
+    private final WatchStore watchStore = new WatchStore();
+
     // ==================== 序列 ====================
 
     /**
@@ -350,6 +367,10 @@ public class EtcdNode {
     public static final String HANDLE_ETCD_RPC_LEASE_TTL_REQUEST_METHOD_NAME = "handleEtcdRpcLeaseTtlRequest";
 
     public static final String HANDLE_ETCD_RPC_LEASE_LIST_REQUEST_METHOD_NAME = "handleEtcdRpcLeaseListRequest";
+
+    public static final String HANDLE_ETCD_RPC_WATCH_SUBSCRIBE_REQUEST_METHOD_NAME = "handleEtcdRpcWatchSubscribeRequest";
+
+    public static final String HANDLE_ETCD_RPC_WATCH_CANCEL_REQUEST_METHOD_NAME = "handleEtcdRpcWatchCancelRequest";
 
     public static final String HANDLE_RAFT_RPC_REQUEST_VOTE_REQUEST_METHOD_NAME = "handleRaftRpcRequestVoteRequest";
 
@@ -668,7 +689,7 @@ public class EtcdNode {
      * <p>处理流程：</p>
      * <p>1) 根据 event.type 取出对应 XxxRequest；</p>
      * <p>2) PUT / DELETE / DELETE_RANGE / TXN / COMPACT 必然转换为 EtcdCommand 进入 Raft；</p>
-     * <p>3) GET / RANGE / LEASE_TTL / LEASE_LIST 根据语义决定进入 Raft 还是本地读取；</p>
+     * <p>3) GET / RANGE / LEASE_TTL / LEASE_LIST / WATCH_SUBSCRIBE / WATCH_CANCEL 根据语义决定进入 Raft 还是本地读取；</p>
      * <p>4) 本地处理直接完成 event future，Raft 路径则等待 apply 阶段回填。</p>
      *
      * @param event Etcd 内部事件
@@ -711,6 +732,12 @@ public class EtcdNode {
                     return;
                 case LEASE_LIST:
                     processLeaseListEvent(event);
+                    return;
+                case WATCH_SUBSCRIBE:
+                    processWatchSubscribeEvent(event);
+                    return;
+                case WATCH_CANCEL:
+                    processWatchCancelEvent(event);
                     return;
                 default:
                     completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), "unsupported etcd event type: " + event.getType()));
@@ -779,6 +806,28 @@ public class EtcdNode {
     private void processLeaseListEvent(EtcdEvent event) {
         LeaseListRequest request = eventCodec.decodeEtcdEventData(event, EtcdEventType.LEASE_LIST, LeaseListRequest.class);
         LeaseListResponse response = readLeaseListRequest(request);
+        completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.success(event.getEventId(), response));
+    }
+
+    /**
+     * 处理 WatchSubscribe 事件。
+     */
+    private void processWatchSubscribeEvent(EtcdEvent event) {
+        try {
+            WatchSubscribeRequest request = eventCodec.decodeEtcdEventData(event, EtcdEventType.WATCH_SUBSCRIBE, WatchSubscribeRequest.class);
+            WatchSubscribeResponse response = applyWatchSubscribeRequest(request);
+            completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.success(event.getEventId(), response));
+        } catch (Exception exception) {
+            completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), exception.getMessage()));
+        }
+    }
+
+    /**
+     * 处理 WatchCancel 事件。
+     */
+    private void processWatchCancelEvent(EtcdEvent event) {
+        WatchCancelRequest request = eventCodec.decodeEtcdEventData(event, EtcdEventType.WATCH_CANCEL, WatchCancelRequest.class);
+        WatchCancelResponse response = applyWatchCancelRequest(request);
         completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.success(event.getEventId(), response));
     }
 
@@ -1435,14 +1484,18 @@ public class EtcdNode {
                     if (request == null) {
                         return EtcdCommandApplyResult.error(command.getCommandId(), "put request is null");
                     }
-                    return EtcdCommandApplyResult.success(command.getCommandId(), applyPutRequest(request));
+                    PutResponse response = applyPutRequest(request);
+                    publishWatchNotifications(false);
+                    return EtcdCommandApplyResult.success(command.getCommandId(), response);
                 }
                 case DELETE: {
                     DeleteRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.DELETE, DeleteRequest.class);
                     if (request == null) {
                         return EtcdCommandApplyResult.error(command.getCommandId(), "delete request is null");
                     }
-                    return EtcdCommandApplyResult.success(command.getCommandId(), applyDeleteRequest(request));
+                    DeleteResponse response = applyDeleteRequest(request);
+                    publishWatchNotifications(false);
+                    return EtcdCommandApplyResult.success(command.getCommandId(), response);
                 }
                 case GET: {
                     GetRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.GET, GetRequest.class);
@@ -1463,21 +1516,27 @@ public class EtcdNode {
                     if (request == null) {
                         return EtcdCommandApplyResult.error(command.getCommandId(), "delete-range request is null");
                     }
-                    return EtcdCommandApplyResult.success(command.getCommandId(), applyDeleteRangeRequest(request));
+                    DeleteRangeResponse response = applyDeleteRangeRequest(request);
+                    publishWatchNotifications(false);
+                    return EtcdCommandApplyResult.success(command.getCommandId(), response);
                 }
                 case TXN: {
                     TxnRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.TXN, TxnRequest.class);
                     if (request == null) {
                         return EtcdCommandApplyResult.error(command.getCommandId(), "txn request is null");
                     }
-                    return EtcdCommandApplyResult.success(command.getCommandId(), applyTxnRequest(request));
+                    TxnResponse response = applyTxnRequest(request);
+                    publishWatchNotifications(false);
+                    return EtcdCommandApplyResult.success(command.getCommandId(), response);
                 }
                 case COMPACT: {
                     CompactRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.COMPACT, CompactRequest.class);
                     if (request == null) {
                         return EtcdCommandApplyResult.error(command.getCommandId(), "compact request is null");
                     }
-                    return EtcdCommandApplyResult.success(command.getCommandId(), applyCompactRequest(request));
+                    CompactResponse response = applyCompactRequest(request);
+                    publishWatchNotifications(true);
+                    return EtcdCommandApplyResult.success(command.getCommandId(), response);
                 }
                 case LEASE_GRANT: {
                     LeaseGrantRequest request = commandCodec.decodeCommandData(command, EtcdCommandType.LEASE_GRANT, LeaseGrantRequest.class);
@@ -1498,7 +1557,9 @@ public class EtcdNode {
                     if (request == null) {
                         return EtcdCommandApplyResult.error(command.getCommandId(), "lease revoke request is null");
                     }
-                    return EtcdCommandApplyResult.success(command.getCommandId(), applyLeaseRevokeRequest(request));
+                    LeaseRevokeResponse response = applyLeaseRevokeRequest(request);
+                    publishWatchNotifications(false);
+                    return EtcdCommandApplyResult.success(command.getCommandId(), response);
                 }
                 default:
                     return EtcdCommandApplyResult.error(command.getCommandId(), "unsupported command type: " + type);
@@ -1756,6 +1817,223 @@ public class EtcdNode {
             leaseViews.add(LeaseView.of(leaseRecord, nowMillis));
         }
         return LeaseListResponse.of(leaseViews);
+    }
+
+    /**
+     * 创建 Watch 会话。
+     *
+     * <p>创建阶段只负责“会话注册 + 历史回放 + 游标初始化”，不负责真正的实时推送。</p>
+     *
+     * <p>这里最容易混淆的是三个 revision：</p>
+     * <ul>
+     *     <li>{@code currentRevision}：当前全局 KV 状态机已经到达的最新 revision。</li>
+     *     <li>{@code startRevision}：客户端希望从哪个 revision 开始看。</li>
+     *     <li>{@code nextRevision}：这个 watch 自己下一次应该继续读取的 revision。</li>
+     * </ul>
+     *
+     * <p>处理路径：</p>
+     * <ol>
+     *     <li>先校验请求参数和 compact 边界。</li>
+     *     <li>再把 `startRevision=0` 转成 `currentRevision + 1`，表示只追未来事件。</li>
+     *     <li>然后在 WatchStore 中登记会话，并按 revision 窗口读取历史事件做回放。</li>
+     *     <li>最后把 nextRevision 推进到回放区间末尾之后，供后续实时推送继续使用。</li>
+     * </ol>
+     */
+    private WatchSubscribeResponse applyWatchSubscribeRequest(WatchSubscribeRequest request) {
+        validateWatchSubscribeRequest(request);
+        long currentRevision = keyValueStore.currentRevision();
+        // currentRevision 是“当前全局点”，代表订阅 watch 这一刻 KV 已经推进到哪里了。
+        // 它不是 watch 自己的游标，只用来判断是否需要回放历史、是否已经越过 compact 边界。
+
+        // startRevision=0 表示从“当前最新 revision 的下一条”开始追踪，只接收未来事件。
+        // 也就是说：不回放任何历史，只把 watch 的起点放到 currentRevision 后面。
+        long startRevision = request.getStartRevision() <= 0L ? currentRevision + 1L : request.getStartRevision();
+
+        // 先登记会话，再回放历史。
+        // 这么做的原因是：后续无论是历史回放还是实时推送，都要依赖同一个 watchId 和同一条会话记录。
+        WatchSession session = watchStore.create(
+                request.getWatchId(),
+                request.getStartKey(),
+                request.getEndKeyExclusive(),
+                request.isPrefixMatch(),
+                startRevision);
+
+        List<WatchEventView> replayEvents = new ArrayList<>();
+        if (startRevision <= currentRevision) {
+            // 只要 startRevision 落在当前全局 revision 之内，就说明这次 watch 需要先补历史。
+            // 历史回放只读当前状态机，不改写任何 KV 数据。
+            replayEvents = buildWatchEvents(
+                    request.getStartKey(),
+                    request.getEndKeyExclusive(),
+                    request.isPrefixMatch(),
+                    startRevision,
+                    currentRevision,
+                    request.getMaxEvents());
+        }
+
+        // nextRevision 指向“已经回放完的最后一条事件之后”。
+        // 如果回放了历史：下一次实时推送从最后一条回放事件的 modRevision + 1 开始。
+        // 如果没有回放历史：nextRevision 就是 currentRevision + 1，表示只接收未来事件。
+        long nextRevision = computeWatchNextRevision(session.getNextRevision(), replayEvents, currentRevision);
+        watchStore.updateNextRevision(session.getWatchId(), nextRevision);
+        return WatchSubscribeResponse.of(session.getWatchId(), currentRevision, nextRevision, replayEvents);
+    }
+
+    /**
+     * 取消 Watch 会话。
+     *
+     * <p>这里会同时清理 WatchStore 中的会话和 stream 绑定，避免服务端继续给已取消的会话推送事件。</p>
+     */
+    private WatchCancelResponse applyWatchCancelRequest(WatchCancelRequest request) {
+        validateWatchCancelRequest(request);
+        boolean canceled = watchStore.cancel(request.getWatchId());
+        return WatchCancelResponse.of(request.getWatchId(), canceled, keyValueStore.currentRevision());
+    }
+
+    /**
+     * 推送 watch 增量事件并处理 compact 边界。
+     *
+     * <p>当前实现不是单独跑一个 watch 线程，而是在写入 apply 成功后顺带扫描所有会话：
+     * 这样可以保证 watch 事件和 KV 变更共用同一条 apply 顺序流，不会出现先看到事件、后看到数据的乱序问题。</p>
+     */
+    private void publishWatchNotifications(boolean boundaryOnly) {
+        long currentRevision = keyValueStore.currentRevision();
+        long compactRevision = keyValueStore.compactRevision();
+        List<WatchSession> sessions = watchStore.listAll();
+        for (WatchSession session : sessions) {
+            if (session == null) {
+                continue;
+            }
+            long watchId = session.getWatchId();
+            Channel channel = session.getChannel();
+            if (channel == null || !channel.isActive()) {
+                watchStore.cancel(watchId);
+                continue;
+            }
+
+            if (session.getNextRevision() < compactRevision) {
+                // TODO: 这里不做静默丢弃，而是显式推送 compacted 取消，让客户端知道需要重建 watch。
+                watchStore.cancel(watchId);
+                sendWatchNotification(session, RpcMessageType.STREAM,
+                        WatchNotification.compactedCancel(watchId, currentRevision, compactRevision));
+                continue;
+            }
+
+            if (boundaryOnly || session.getNextRevision() > currentRevision) {
+                // boundaryOnly=true 时只处理 compact 边界，不做普通事件推送。
+                continue;
+            }
+
+            // 按会话游标读取当前可见的新事件，再把游标推进到事件末尾之后。
+            List<WatchEventView> events = buildWatchEvents(
+                    session.getStartKey(),
+                    session.getEndKeyExclusive(),
+                    session.isPrefixMatch(),
+                    session.getNextRevision(),
+                    currentRevision,
+                    0);
+            if (events == null || events.isEmpty()) {
+                continue;
+            }
+            long nextRevision = computeWatchNextRevision(session.getNextRevision(), events, currentRevision);
+            watchStore.updateNextRevision(watchId, nextRevision);
+            sendWatchNotification(session, RpcMessageType.STREAM,
+                    WatchNotification.of(watchId, currentRevision, nextRevision, events));
+        }
+    }
+
+    /**
+     * 发送 watch 通知。
+     *
+     * <p>这里统一封装成 RpcMessage.STREAM，再交给 rpc 层按 rpcMessageId 找回客户端 handler。</p>
+     */
+    private void sendWatchNotification(WatchSession session, RpcMessageType messageType, WatchNotification response) {
+        if (session == null || session.getChannel() == null || !session.getChannel().isActive() || response == null) {
+            return;
+        }
+        RpcMessage rpcMessage = new RpcMessage();
+        rpcMessage.setType(messageType);
+        rpcMessage.setRpcMessageId(session.getRpcMessageId());
+        rpcMessage.setData(serializer.serialize(response));
+        session.getChannel().writeAndFlush(rpcMessage);
+    }
+
+    /**
+     * 构建 Watch 事件批次。
+     */
+    private List<WatchEventView> buildWatchEvents(String startKey,
+                                                  String endKeyExclusive,
+                                                  boolean prefixMatch,
+                                                  long startRevisionInclusive,
+                                                  long endRevisionInclusive,
+                                                  int maxEvents) {
+        List<KeyValueRecord> records = keyValueStore.rangeHistoryRecordsForWatch(
+                startKey,
+                endKeyExclusive,
+                prefixMatch,
+                startRevisionInclusive,
+                endRevisionInclusive,
+                maxEvents);
+
+        List<WatchEventView> events = new ArrayList<>();
+        for (KeyValueRecord record : records) {
+            WatchEventType eventType = record.isDeleted() ? WatchEventType.DELETE : WatchEventType.PUT;
+            KeyValueView keyValue = KeyValueView.of(
+                    record.getKey(),
+                    record.getValue(),
+                    record.getCreateRevision(),
+                    record.getModRevision(),
+                    record.getVersion(),
+                    record.getLeaseId());
+            events.add(WatchEventView.of(eventType, keyValue));
+        }
+        return events;
+    }
+
+    /**
+     * 计算 Watch 下一次事件读取起始 revision。
+     */
+    private long computeWatchNextRevision(long previousNextRevision, List<WatchEventView> events, long currentRevision) {
+        if (events != null && !events.isEmpty()) {
+            WatchEventView lastEvent = events.get(events.size() - 1);
+            if (lastEvent.getKeyValue() != null) {
+                return lastEvent.getKeyValue().getModRevision() + 1L;
+            }
+        }
+        return Math.max(previousNextRevision, currentRevision + 1L);
+    }
+
+    /**
+     * 校验 WatchSubscribe 请求。
+     */
+    private void validateWatchSubscribeRequest(WatchSubscribeRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("watch subscribe request must not be null");
+        }
+        if (request.getStartKey() == null || request.getStartKey().trim().isEmpty()) {
+            throw new IllegalArgumentException("watch startKey must not be empty");
+        }
+        if (request.getStartRevision() < 0L) {
+            throw new IllegalArgumentException("watch startRevision must not be negative");
+        }
+        if (request.getMaxEvents() < 0) {
+            throw new IllegalArgumentException("watch maxEvents must not be negative");
+        }
+        if (request.getStartRevision() > 0L && request.getStartRevision() < keyValueStore.compactRevision()) {
+            throw new IllegalArgumentException("required revision has been compacted, requested=" + request.getStartRevision() + ", compactRevision=" + keyValueStore.compactRevision());
+        }
+    }
+
+    /**
+     * 校验 WatchCancel 请求。
+     */
+    private void validateWatchCancelRequest(WatchCancelRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("watch cancel request must not be null");
+        }
+        if (request.getWatchId() <= 0L) {
+            throw new IllegalArgumentException("watchId must be positive");
+        }
     }
 
     /**
@@ -2302,6 +2580,39 @@ public class EtcdNode {
      */
     public EtcdRpcResponse<LeaseListResponse> handleEtcdRpcLeaseListRequest(LeaseListRequest request) {
         return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.LEASE_LIST, request), LeaseListResponse.class);
+    }
+
+    /**
+     * 处理 WatchSubscribe 请求。
+     *
+     * <p>这个方法是 watch 长连接的握手入口：RPC 层先把 subscribe 请求送进 event-loop，
+     * event-loop 返回订阅结果后，再把 watchId 绑定到当前 channel，后续实时通知才能直接写回同一条流。</p>
+     */
+    public EtcdRpcResponse<WatchSubscribeResponse> handleEtcdRpcWatchSubscribeRequest(WatchSubscribeRequest request, Channel channel, String rpcMessageId) {
+        if (request != null && request.isLeaderOnly() && getRole() != RaftRoleType.LEADER) {
+            // TODO: leaderOnly 订阅握手必须由 leader 受理；follower 明确返回 notLeader，交给客户端路由重试。
+            return EtcdRpcResponse.fromApplyResult(EtcdCommandApplyResult.notLeader(raftNode.getLeaderId()), null);
+        }
+
+        EtcdRpcResponse<WatchSubscribeResponse> response = buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.WATCH_SUBSCRIBE, request), WatchSubscribeResponse.class);
+        if (response != null && response.getHeader() != null && response.getHeader().isSuccess()
+                && response.getBody() != null && response.getBody().getWatchId() > 0L && channel != null) {
+            // TODO: 同一个 channel 可以承载多个 watchId，这里只追加绑定，不独占 channel。
+            // 客户端多次 watch 在 RPC 层会复用同一 TCP；服务端据此把多个 watch 会话挂到同一 channelId，
+            // rpcMessageId 用于把服务端推送路由回客户端对应的 watch 路由上下文。
+            // 只有在订阅成功后才绑定 channel，避免失败请求占用 stream 资源。
+            watchStore.bindWatchChannel(response.getBody().getWatchId(), channel, rpcMessageId);
+        }
+        return response;
+    }
+
+    /**
+     * 处理 WatchCancel 请求。
+     *
+     * <p>取消请求同样走 event-loop，保证 cancel 与当前 apply 顺序一致。</p>
+     */
+    public EtcdRpcResponse<WatchCancelResponse> handleEtcdRpcWatchCancelRequest(WatchCancelRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.WATCH_CANCEL, request), WatchCancelResponse.class);
     }
 
     /**

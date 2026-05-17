@@ -117,7 +117,8 @@ public class RpcRequestExecutor {
                     serviceDefinition.getServiceObject(),
                     methodDefinition,
                     requestMessage.getData(),
-                    channel);
+                    channel,
+                    requestMessage.getRpcMessageId());
 
             // 4) 返回值为空表示该方法自行处理响应，例如流式方法可能直接通过 Channel 写回多帧数据。
             if (result != null) {

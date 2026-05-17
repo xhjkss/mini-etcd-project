@@ -93,5 +93,19 @@ public enum EtcdEventType {
      *
      * <p>List 查询属于只读事件，不进入 Raft；由 etcd-event-loop 统一调度本地读取，保持入口一致。</p>
      */
-    LEASE_LIST
+    LEASE_LIST,
+
+    /**
+     * WatchSubscribe 事件。
+     *
+     * <p>Watch 订阅属于只读控制事件，由 etcd-event-loop 本地处理并注册 watch 会话。</p>
+     */
+    WATCH_SUBSCRIBE,
+
+    /**
+     * WatchCancel 事件。
+     *
+     * <p>Watch 取消属于只读控制事件，由 etcd-event-loop 本地处理并释放会话。</p>
+     */
+    WATCH_CANCEL
 }

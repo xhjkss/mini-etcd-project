@@ -210,6 +210,76 @@ public class KeyValueStore {
     }
 
     /**
+     * 按范围读取历史记录（包含 tombstone），用于 Watch 事件回放。
+     *
+     * <p>该方法不会套用 get/range 的“只看当前可见值”逻辑，而是直接返回 revision 区间内的历史版本，
+     * 供 Watch 在创建时做历史回放和在实时推送前补齐缺失事件。</p>
+     *
+     * <p>处理思路：</p>
+     * <ol>
+     *     <li>先把单 key / 前缀 / range 三种访问方式统一成一个左闭右开区间。</li>
+     *     <li>再在每个 key 的历史版本列表里过滤 revision 窗口。</li>
+     *     <li>最后按 revision 升序、key 升序做稳定排序，保证多节点回放顺序一致。</li>
+     * </ol>
+     *
+     * <p>Watch 创建时会先拿到当前全局 revision，再把客户端给的 startRevision 与这个全局点对齐。
+     * 这里返回的就是“从 startRevision 到 currentRevision 之间真正发生过的变更历史”。</p>
+     *
+     * @param startKey               起始 key
+     * @param endKeyExclusive        结束 key（左闭右开）
+     * @param prefixMatch            是否按前缀匹配
+     * @param startRevisionInclusive 起始 revision（含）
+     * @param endRevisionInclusive   结束 revision（含）
+     * @param limit                  最大返回条数，0 表示不限制
+     * @return 按 modRevision 升序、key 升序稳定排序的历史记录
+     */
+    public List<KeyValueRecord> rangeHistoryRecordsForWatch(String startKey, String endKeyExclusive, boolean prefixMatch, long startRevisionInclusive, long endRevisionInclusive, int limit) {
+        validateKey(startKey);
+        if (endRevisionInclusive < 1L) {
+            return new ArrayList<>();
+        }
+        long normalizedStartRevisionInclusive = Math.max(1L, startRevisionInclusive);
+        if (normalizedStartRevisionInclusive > endRevisionInclusive) {
+            return new ArrayList<>();
+        }
+
+        String resolvedEndKeyExclusive = resolveEndKeyExclusive(startKey, endKeyExclusive, prefixMatch);
+        List<KeyValueRecord> records = new ArrayList<>();
+        if (resolvedEndKeyExclusive == null || resolvedEndKeyExclusive.length() == 0) {
+            // 单 key 场景：只读取 startKey 自身对应的历史链。
+            // 这个分支通常对应 watch 的单 key 订阅。
+            appendHistoryRecordsInRevisionWindow(historyByKey.get(startKey),
+                    normalizedStartRevisionInclusive,
+                    endRevisionInclusive,
+                    records);
+        } else {
+            // 区间/前缀场景：先在有序 key 空间里拿到目标视图，再逐个 key 过滤 revision 窗口。
+            // 这个分支通常对应 watch 的 prefix 订阅，或者 range 订阅。
+            NavigableMap<String, List<KeyValueRecord>> rangeView = historyByKey.subMap(startKey, true, resolvedEndKeyExclusive, false);
+            for (Map.Entry<String, List<KeyValueRecord>> entry : rangeView.entrySet()) {
+                appendHistoryRecordsInRevisionWindow(entry.getValue(),
+                        normalizedStartRevisionInclusive,
+                        endRevisionInclusive,
+                        records);
+            }
+        }
+
+        records.sort((left, right) -> {
+            int revisionCompare = Long.compare(left.getModRevision(), right.getModRevision());
+            if (revisionCompare != 0) {
+                return revisionCompare;
+            }
+            return left.getKey().compareTo(right.getKey());
+        });
+        // TODO: Watch 的历史回放和实时事件都依赖这个顺序稳定性，因此这里显式排序，而不是依赖底层 Map 遍历顺序。
+        // 这样做的目的，是让多个节点在同一 revision 区间上回放出完全一致的事件顺序。
+        if (limit > 0 && records.size() > limit) {
+            return new ArrayList<>(records.subList(0, limit));
+        }
+        return records;
+    }
+
+    /**
      * 删除单个 key。
      */
     public KeyValueDeleteResult delete(String key) {
@@ -553,6 +623,25 @@ public class KeyValueStore {
         record.setDeleted(true);
         record.setLeaseId(previousRecord.getLeaseId());
         appendRecord(record);
+    }
+
+    /**
+     * 追加 revision 区间内的历史记录（包含 tombstone）。
+     */
+    private void appendHistoryRecordsInRevisionWindow(List<KeyValueRecord> sourceRecords, long startRevisionInclusive, long endRevisionInclusive, List<KeyValueRecord> target) {
+        if (sourceRecords == null || sourceRecords.isEmpty()) {
+            return;
+        }
+        for (KeyValueRecord record : sourceRecords) {
+            long modRevision = record.getModRevision();
+            if (modRevision < startRevisionInclusive) {
+                continue;
+            }
+            if (modRevision > endRevisionInclusive) {
+                break;
+            }
+            target.add(copyRecord(record));
+        }
     }
 
     /**

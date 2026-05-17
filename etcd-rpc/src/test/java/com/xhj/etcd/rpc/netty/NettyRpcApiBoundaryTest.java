@@ -18,7 +18,8 @@ public class NettyRpcApiBoundaryTest {
         assertMethodNotPublic("registerHandler");
         assertMethodNotPublic("removeHandler");
         assertMethodNotPublic("sendRequest");
-        assertOnlyOnePublicOpenStreamMethod();
+        assertNoPublicOpenStreamMethod();
+        assertOnlyOnePublicSendRequestWithRpcMessageIdMethod();
     }
 
     @Test
@@ -75,11 +76,22 @@ public class NettyRpcApiBoundaryTest {
         }
     }
 
-    private void assertOnlyOnePublicOpenStreamMethod() {
+    private void assertNoPublicOpenStreamMethod() {
         int count = 0;
         Method[] methods = NettyRpcClient.class.getMethods();
         for (Method method : methods) {
             if (method.getName().equals("openStream")) {
+                count++;
+            }
+        }
+        Assert.assertEquals(0, count);
+    }
+
+    private void assertOnlyOnePublicSendRequestWithRpcMessageIdMethod() {
+        int count = 0;
+        Method[] methods = NettyRpcClient.class.getMethods();
+        for (Method method : methods) {
+            if (method.getName().equals("sendRequestWithRpcMessageId")) {
                 count++;
             }
         }

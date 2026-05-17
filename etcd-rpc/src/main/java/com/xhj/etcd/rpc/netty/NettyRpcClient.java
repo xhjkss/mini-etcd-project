@@ -7,7 +7,6 @@ import com.xhj.etcd.rpc.RpcMessageHandler;
 import com.xhj.etcd.rpc.RpcMessageHandlerRegistration;
 import com.xhj.etcd.rpc.RpcMessageHandlerRegistry;
 import com.xhj.etcd.rpc.RpcMessageType;
-import com.xhj.etcd.rpc.RpcStream;
 import com.xhj.etcd.rpc.core.ClientRpcMessageDispatcher;
 import com.xhj.etcd.rpc.core.UnaryRpcMessageHandler;
 import com.xhj.etcd.serializer.Serializer;
@@ -37,12 +36,12 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>职责边界：</p>
  * <ul>
  *     <li>负责客户端侧 Netty Bootstrap、Channel 复用和消息写出。</li>
- *     <li>负责为一元调用、流式调用注册 RpcMessageHandler。</li>
+ *     <li>负责为一元请求与显式 rpcMessageId 路由请求注册 RpcMessageHandler。</li>
  *     <li>负责把写失败转换为 ERROR 消息交给客户端分发器处理。</li>
  *     <li>不负责服务端方法路由，服务端的 serviceName/methodName 分发由 ServerRpcMessageDispatcher 和 RpcRequestExecutor 处理。</li>
  * </ul>
  *
- * <p>TODO: 客户端响应不按 serviceName/methodName 分发，而是按 rpcMessageId 找回请求发送前注册的 handler。因此 call/openStream 发送请求前必须先注册 handler，再写出请求消息。</p>
+ * <p>TODO: 客户端响应不按 serviceName/methodName 分发，而是按 rpcMessageId 找回请求发送前注册的 handler。因此发送请求前必须先注册 handler，再写出请求消息。</p>
  */
 public class NettyRpcClient implements RpcClient {
 
@@ -151,36 +150,47 @@ public class NettyRpcClient implements RpcClient {
     }
 
     /**
-     * 打开流式 RPC 调用。
+     * 发送带显式 rpcMessageId 的请求。
      *
-     * <p>流式 RPC 会复用同一个 rpcMessageId 持续接收多帧 STREAM/ERROR/HEARTBEAT 等消息，
-     * 因此 handler 不会像一元调用那样在首个响应后自动结束，而是由返回的 RpcStream 控制生命周期。</p>
+     * <p>该方法用于“调用方自己管理 rpcMessageId 生命周期”的场景，例如 watch 这类同一会话下需要持续接收
+     * RESPONSE/STREAM 的长时路由语义。框架侧只负责：</p>
+     * <ul>
+     *     <li>校验并使用调用方传入的 rpcMessageId。</li>
+     *     <li>可选注册调用方提供的 handler（传 null 则仅发送请求，不注册新 handler）。</li>
+     *     <li>按统一 sendRequest 路径写出请求，并复用写失败转 ERROR 的分发语义。</li>
+     * </ul>
      *
-     * @param streamId    调用方指定的流 ID；为空时由客户端自动生成
-     * @param endpoint    目标节点地址
-     * @param serviceName RPC 服务名
-     * @param methodName  RPC 方法名
-     * @param request     首帧请求对象
-     * @param handler     流式消息处理器
-     * @return 流式 RPC 句柄
+     * <p>TODO: 该方法不会等待响应，也不会自动清理 handler。调用方需要在会话结束或失败时主动调用 removeRpcMessageHandler(rpcMessageId) 完成回收。</p>
+     *
+     * @param endpoint     目标节点地址
+     * @param serviceName  RPC 服务名
+     * @param methodName   RPC 方法名
+     * @param request      请求对象
+     * @param rpcMessageId 显式指定的消息 ID
+     * @param handler      消息处理器，可为空
      */
     @Override
-    public RpcStream openStream(String streamId, NodeEndpoint endpoint, String serviceName, String methodName, Object request, RpcMessageHandler handler) {
-        String rpcMessageId = (streamId == null || streamId.trim().length() == 0)
-                ? nextRpcMessageId()
-                : streamId.trim();
-
-        // 流式调用在整个 stream 生命周期内复用同一个 handler 注册关系。
-        RpcMessageHandlerRegistration registration = registerHandler(rpcMessageId, handler);
-        NettyRpcStream stream = new NettyRpcStream(rpcMessageId, endpoint, registration);
-        try {
-            sendRequest(endpoint, serviceName, methodName, request, rpcMessageId);
-            return stream;
-        } catch (Exception e) {
-            // 首帧请求发送失败时，需要关闭 stream 并注销 handler，避免注册表残留。
-            stream.close();
-            throw e;
+    public void sendRequestWithRpcMessageId(NodeEndpoint endpoint, String serviceName, String methodName, Object request, String rpcMessageId, RpcMessageHandler handler) {
+        // 1) 先校验显式 rpcMessageId，避免空路由 ID 导致响应无法回填。
+        if (rpcMessageId == null || rpcMessageId.trim().length() == 0) {
+            throw new IllegalArgumentException("rpcMessageId must not be empty");
         }
+
+        // 2) 调用方传入 handler 时先注册，再发送请求，避免响应先到达时找不到处理器。
+        if (handler != null) {
+            registerHandler(rpcMessageId, handler);
+        }
+
+        // 3) 走统一请求发送路径；写失败会由 attachWriteFailureHandler 转换为 ERROR 分发给对应 handler。
+        sendRequest(endpoint, serviceName, methodName, request, rpcMessageId);
+    }
+
+    /**
+     * 移除指定 rpcMessageId 的客户端消息处理器。
+     */
+    @Override
+    public void removeRpcMessageHandler(String rpcMessageId) {
+        removeHandler(rpcMessageId);
     }
 
     /**
@@ -380,85 +390,4 @@ public class NettyRpcClient implements RpcClient {
         });
     }
 
-    /**
-     * NettyRpcStream
-     *
-     * @author XJks
-     * @description Netty 流式 RPC 句柄，维护单个 stream 的 rpcMessageId、目标 endpoint 和 handler 注册关系。
-     */
-    private class NettyRpcStream implements RpcStream {
-
-        /**
-         * 流式 RPC 消息 ID。
-         *
-         * <p>同一个 stream 后续请求和响应都会复用该 ID，以便客户端分发器把多帧消息路由到同一个 handler。</p>
-         */
-        private final String rpcMessageId;
-
-        /**
-         * 流式 RPC 目标节点。
-         */
-        private final NodeEndpoint endpoint;
-
-        /**
-         * 当前 stream 对应的 handler 注册关系。
-         *
-         * <p>stream 关闭时通过该 registration 注销 handler。</p>
-         */
-        private final RpcMessageHandlerRegistration registration;
-
-        /**
-         * stream 是否已经关闭。
-         */
-        private volatile boolean closed;
-
-        private NettyRpcStream(String rpcMessageId, NodeEndpoint endpoint, RpcMessageHandlerRegistration registration) {
-            this.rpcMessageId = rpcMessageId;
-            this.endpoint = endpoint;
-            this.registration = registration;
-        }
-
-        @Override
-        public String getRpcMessageId() {
-            return rpcMessageId;
-        }
-
-        /**
-         * 在当前 stream 上继续发送请求。
-         *
-         * <p>和普通一元调用不同，stream 后续请求会继续复用当前 rpcMessageId，
-         * 这样服务端返回的多帧消息仍会被分发到同一个 handler。</p>
-         *
-         * @param serviceName RPC 服务名
-         * @param methodName  RPC 方法名
-         * @param request     请求对象
-         */
-        @Override
-        public void sendRequest(String serviceName, String methodName, Object request) {
-            if (closed) {
-                return;
-            }
-            NettyRpcClient.this.sendRequest(endpoint, serviceName, methodName, request, rpcMessageId);
-        }
-
-        @Override
-        public boolean isClosed() {
-            return closed;
-        }
-
-        /**
-         * 关闭当前 stream。
-         *
-         * <p>关闭操作只影响客户端本地 handler 注册关系，不会主动关闭底层 Channel。
-         * 底层 Channel 由 NettyChannelRegistry 按 endpoint 维度复用。</p>
-         */
-        @Override
-        public void close() {
-            if (closed) {
-                return;
-            }
-            closed = true;
-            registration.remove();
-        }
-    }
 }

@@ -26,6 +26,10 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeResponse;
 import com.xhj.etcd.rpc.NodeEndpoint;
 import com.xhj.etcd.rpc.RpcClient;
 
@@ -312,6 +316,38 @@ public final class EtcdTestSupport {
         return client.call(endpoint,
                 EtcdNode.RPC_SERVICE_NAME,
                 EtcdNode.HANDLE_ETCD_RPC_LEASE_LIST_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 WATCH_SUBSCRIBE。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  WATCH_SUBSCRIBE 请求
+     * @return WATCH_SUBSCRIBE 响应
+     */
+    public static EtcdRpcResponse<WatchSubscribeResponse> callWatchSubscribeByRpc(RpcClient client, NodeEndpoint endpoint, WatchSubscribeRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_WATCH_SUBSCRIBE_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 WATCH_CANCEL。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  WATCH_CANCEL 请求
+     * @return WATCH_CANCEL 响应
+     */
+    public static EtcdRpcResponse<WatchCancelResponse> callWatchCancelByRpc(RpcClient client, NodeEndpoint endpoint, WatchCancelRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_WATCH_CANCEL_REQUEST_METHOD_NAME,
                 request,
                 EtcdRpcResponse.class);
     }

@@ -22,6 +22,10 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeResponse;
 import com.xhj.etcd.kernel.testsupport.network.DistributedNetworkTestSkeleton;
 import com.xhj.etcd.rpc.NodeEndpoint;
 
@@ -355,6 +359,48 @@ public abstract class EtcdDistributedTestSkeleton
             Thread.sleep(100L);
         }
         throw new AssertionError("lease list retry timeout", lastException);
+    }
+
+    protected WatchSubscribeResponse watchSubscribeOnLeaderWithRetry(WatchSubscribeRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<WatchSubscribeResponse> response = EtcdTestSupport.callWatchSubscribeByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("watch subscribe retry timeout", lastException);
+    }
+
+    protected WatchCancelResponse watchCancelOnLeaderWithRetry(WatchCancelRequest request, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        Exception lastException = null;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
+                EtcdRpcResponse<WatchCancelResponse> response = EtcdTestSupport.callWatchCancelByRpc(
+                        harness.getTestClient(),
+                        leaderEndpoint,
+                        request);
+                if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
+                    return response.getBody();
+                }
+            } catch (Exception e) {
+                lastException = e;
+            }
+            Thread.sleep(100L);
+        }
+        throw new AssertionError("watch cancel retry timeout", lastException);
     }
 }
 

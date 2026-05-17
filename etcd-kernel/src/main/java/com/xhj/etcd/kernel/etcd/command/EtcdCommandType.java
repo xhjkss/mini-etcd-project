@@ -6,7 +6,8 @@ package com.xhj.etcd.kernel.etcd.command;
  * @author XJks
  * @description Etcd 命令类型枚举。
  *
- * <p>当前 Phase 支持 PUT、DELETE、GET、RANGE、DELETE_RANGE、TXN、COMPACT，用于 MVCC KV 与 Raft-RPC 联调闭环。</p>
+ * <p>当前 Phase 支持 PUT、DELETE、GET、RANGE、DELETE_RANGE、TXN、COMPACT、LEASE_GRANT、LEASE_KEEP_ALIVE、LEASE_REVOKE，
+ * 用于内核状态写入与 Raft-RPC 联调闭环。</p>
  */
 public enum EtcdCommandType {
 

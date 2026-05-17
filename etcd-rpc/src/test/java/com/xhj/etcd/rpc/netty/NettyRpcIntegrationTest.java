@@ -5,7 +5,6 @@ import com.xhj.etcd.rpc.RpcMessage;
 import com.xhj.etcd.rpc.RpcMessageHandler;
 import com.xhj.etcd.rpc.RpcMessageHandlerRegistration;
 import com.xhj.etcd.rpc.RpcMessageType;
-import com.xhj.etcd.rpc.RpcStream;
 import com.xhj.etcd.rpc.fixture.EchoEventService;
 import com.xhj.etcd.rpc.fixture.EchoRequest;
 import com.xhj.etcd.rpc.fixture.EchoResponse;
@@ -61,21 +60,20 @@ public class NettyRpcIntegrationTest {
 
             EchoRequest request = buildEchoRequest("call");
             request.setEventId(eventId);
-            RpcStream stream = client.openStream(
-                    eventId,
+            client.sendRequestWithRpcMessageId(
                     endpoint,
                     "EchoEventService",
                     "echoEvents",
                     request,
-                    handler
-            );
+                    eventId,
+                    handler);
 
             Assert.assertTrue(handler.await(5000L));
             Assert.assertEquals(3, handler.messages.size());
             Assert.assertEquals("event:first", handler.messages.get(0));
             Assert.assertEquals("event:second", handler.messages.get(1));
             Assert.assertEquals("response:call", handler.messages.get(2));
-            stream.close();
+            client.removeRpcMessageHandler(eventId);
         } finally {
             client.shutdown();
             server.stop();
@@ -119,7 +117,7 @@ public class NettyRpcIntegrationTest {
     private static class EchoEventHandler implements RpcMessageHandler {
         private final Serializer serializer;
         private final CountDownLatch latch;
-        private final List<String> messages = Collections.synchronizedList(new ArrayList<String>());
+        private final List<String> messages = Collections.synchronizedList(new ArrayList<>());
 
         private EchoEventHandler(Serializer serializer, int expectedMessageCount) {
             this.serializer = serializer;

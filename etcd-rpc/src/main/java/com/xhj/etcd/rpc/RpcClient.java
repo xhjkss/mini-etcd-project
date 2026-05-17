@@ -4,7 +4,7 @@ package com.xhj.etcd.rpc;
  * RpcClient
  *
  * @author XJks
- * @description RPC 客户端接口，定义同步调用、单向发送、流式请求和心跳能力。
+ * @description RPC 客户端接口，定义同步调用、单向发送、显式消息ID请求和心跳能力。
  */
 public interface RpcClient {
 
@@ -22,12 +22,17 @@ public interface RpcClient {
      */
     void send(NodeEndpoint endpoint, String serviceName, String methodName, Object request);
 
-    // ==================== 流式请求 ====================
+    // ==================== 指定消息ID请求 ====================
 
     /**
-     * 打开 RPC 流式通道。
+     * 发送带显式 rpcMessageId 的 RPC 请求。
      */
-    RpcStream openStream(String streamId, NodeEndpoint endpoint, String serviceName, String methodName, Object request, RpcMessageHandler handler);
+    void sendRequestWithRpcMessageId(NodeEndpoint endpoint, String serviceName, String methodName, Object request, String rpcMessageId, RpcMessageHandler handler);
+
+    /**
+     * 移除指定 rpcMessageId 的客户端消息处理器。
+     */
+    void removeRpcMessageHandler(String rpcMessageId);
 
     // ==================== 心跳 ====================
 

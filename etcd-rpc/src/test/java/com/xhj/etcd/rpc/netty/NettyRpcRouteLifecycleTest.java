@@ -5,7 +5,6 @@ import com.xhj.etcd.rpc.RpcMessage;
 import com.xhj.etcd.rpc.RpcMessageHandler;
 import com.xhj.etcd.rpc.RpcMessageHandlerRegistration;
 import com.xhj.etcd.rpc.RpcMessageType;
-import com.xhj.etcd.rpc.RpcStream;
 import com.xhj.etcd.rpc.fixture.EchoEventService;
 import com.xhj.etcd.rpc.fixture.EchoRequest;
 import com.xhj.etcd.rpc.fixture.EchoResponse;
@@ -25,15 +24,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * NettyRpcStreamLifecycleTest
+ * NettyRpcRouteLifecycleTest
  *
  * @author XJks
- * @description Netty 流式 RPC 生命周期测试，验证多 stream 分发、关闭后忽略发送和连接关闭通知。
+ * @description Netty RPC 路由生命周期测试，验证多 rpcMessageId 分发、移除路由和连接关闭通知。
  */
-public class NettyRpcStreamLifecycleTest {
+public class NettyRpcRouteLifecycleTest {
 
     @Test
-    public void shouldRouteMultipleStreamsByRpcMessageId() throws Exception {
+    public void shouldRouteMultipleRouteIdsByRpcMessageId() throws Exception {
         Serializer serializer = new JdkSerializer();
         NodeEndpoint endpoint = new NodeEndpoint("node-multi-stream", "127.0.0.1", findFreePort());
         NettyRpcServer server = new NettyRpcServer(endpoint, serializer);
@@ -47,8 +46,8 @@ public class NettyRpcStreamLifecycleTest {
             EchoRequest firstRequest = request("first-call", "stream-1");
             EchoRequest secondRequest = request("second-call", "stream-2");
 
-            RpcStream firstStream = client.openStream("stream-1", endpoint, "EchoEventService", "echoEvents", firstRequest, firstHandler);
-            RpcStream secondStream = client.openStream("stream-2", endpoint, "EchoEventService", "echoEvents", secondRequest, secondHandler);
+            client.sendRequestWithRpcMessageId(endpoint, "EchoEventService", "echoEvents", firstRequest, "stream-1", firstHandler);
+            client.sendRequestWithRpcMessageId(endpoint, "EchoEventService", "echoEvents", secondRequest, "stream-2", secondHandler);
 
             Assert.assertTrue(firstHandler.await(5000L));
             Assert.assertTrue(secondHandler.await(5000L));
@@ -62,8 +61,8 @@ public class NettyRpcStreamLifecycleTest {
             Assert.assertEquals("event:second", secondHandler.messages.get(1));
             Assert.assertEquals("response:second-call", secondHandler.messages.get(2));
 
-            firstStream.close();
-            secondStream.close();
+            client.removeRpcMessageHandler("stream-1");
+            client.removeRpcMessageHandler("stream-2");
         } finally {
             client.shutdown();
             server.stop();
@@ -71,23 +70,37 @@ public class NettyRpcStreamLifecycleTest {
     }
 
     @Test
-    public void shouldCloseStreamAndIgnoreLaterSendRequest() throws Exception {
+    public void shouldStopDispatchingAfterRemovingRouteHandler() throws Exception {
         Serializer serializer = new JdkSerializer();
-        NodeEndpoint endpoint = new NodeEndpoint("node-stream-close", "127.0.0.1", findFreePort());
+        NodeEndpoint endpoint = new NodeEndpoint("node-route-close", "127.0.0.1", findFreePort());
         NettyRpcServer server = new NettyRpcServer(endpoint, serializer);
         NettyRpcClient client = new NettyRpcClient(serializer, 5000L);
-        CountingStreamService service = new CountingStreamService();
-        server.registerService("CountingStreamService", service, "hold");
+        server.registerService("EchoEventService", new EchoEventService(serializer), "echoEvents");
         server.start();
         try {
-            RpcStream stream = client.openStream("stream-close", endpoint, "CountingStreamService", "hold", request("first", "stream-close"), new NoopStreamHandler());
-            Assert.assertTrue(service.awaitInvocationCount(1, 5000L));
+            RecordingStreamHandler handler = new RecordingStreamHandler(serializer, 3);
+            client.sendRequestWithRpcMessageId(
+                    endpoint,
+                    "EchoEventService",
+                    "echoEvents",
+                    request("first-call", "route-close"),
+                    "route-close",
+                    handler);
 
-            stream.close();
-            stream.sendRequest("CountingStreamService", "hold", request("second", "stream-close"));
+            Assert.assertTrue(handler.await(5000L));
+            Assert.assertEquals(3, handler.messages.size());
 
-            Assert.assertTrue(stream.isClosed());
-            Assert.assertEquals(1, service.invocationCount.get());
+            client.removeRpcMessageHandler("route-close");
+            client.sendRequestWithRpcMessageId(
+                    endpoint,
+                    "EchoEventService",
+                    "echoEvents",
+                    request("second-call", "route-close"),
+                    "route-close",
+                    null);
+            Thread.sleep(500L);
+
+            Assert.assertEquals(3, handler.messages.size());
         } finally {
             client.shutdown();
             server.stop();
@@ -95,9 +108,9 @@ public class NettyRpcStreamLifecycleTest {
     }
 
     @Test
-    public void shouldNotifyStreamHandlerWhenClientConnectionClosed() throws Exception {
+    public void shouldNotifyRouteHandlerWhenClientConnectionClosed() throws Exception {
         Serializer serializer = new JdkSerializer();
-        NodeEndpoint endpoint = new NodeEndpoint("node-stream-inactive", "127.0.0.1", findFreePort());
+        NodeEndpoint endpoint = new NodeEndpoint("node-route-inactive", "127.0.0.1", findFreePort());
         NettyRpcServer server = new NettyRpcServer(endpoint, serializer);
         NettyRpcClient client = new NettyRpcClient(serializer, 5000L);
         CountingStreamService service = new CountingStreamService();
@@ -105,7 +118,12 @@ public class NettyRpcStreamLifecycleTest {
         server.start();
         try {
             CloseAwareStreamHandler handler = new CloseAwareStreamHandler();
-            client.openStream("stream-inactive", endpoint, "CountingStreamService", "hold", request("first", "stream-inactive"), handler);
+            client.sendRequestWithRpcMessageId(endpoint,
+                    "CountingStreamService",
+                    "hold",
+                    request("first", "stream-inactive"),
+                    "stream-inactive",
+                    handler);
             Assert.assertTrue(service.awaitInvocationCount(1, 5000L));
 
             client.shutdown();
@@ -136,7 +154,7 @@ public class NettyRpcStreamLifecycleTest {
     private static class RecordingStreamHandler implements RpcMessageHandler {
         private final Serializer serializer;
         private final CountDownLatch latch;
-        private final List<String> messages = Collections.synchronizedList(new ArrayList<String>());
+        private final List<String> messages = Collections.synchronizedList(new ArrayList<>());
 
         private RecordingStreamHandler(Serializer serializer, int expectedMessageCount) {
             this.serializer = serializer;
@@ -159,17 +177,6 @@ public class NettyRpcStreamLifecycleTest {
 
         private boolean await(long timeoutMillis) throws InterruptedException {
             return latch.await(timeoutMillis, TimeUnit.MILLISECONDS);
-        }
-    }
-
-    private static class NoopStreamHandler implements RpcMessageHandler {
-        @Override
-        public void handle(RpcMessage message, RpcMessageHandlerRegistration registration) {
-        }
-
-        @Override
-        public void handleConnectionClosed(Throwable cause, RpcMessageHandlerRegistration registration) {
-            registration.remove();
         }
     }
 

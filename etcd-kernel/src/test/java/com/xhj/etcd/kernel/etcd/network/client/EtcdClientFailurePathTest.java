@@ -18,7 +18,6 @@ import com.xhj.etcd.kernel.etcd.network.support.EtcdDistributedTestSkeleton;
 import com.xhj.etcd.rpc.NodeEndpoint;
 import com.xhj.etcd.rpc.RpcClient;
 import com.xhj.etcd.rpc.RpcMessageHandler;
-import com.xhj.etcd.rpc.RpcStream;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -28,7 +27,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
 
 /**
  * EtcdClientFailurePathTest
@@ -45,7 +43,7 @@ public class EtcdClientFailurePathTest extends EtcdDistributedTestSkeleton {
 
     @Test(expected = IllegalArgumentException.class)
     public void shouldRejectEmptyEndpointList() {
-        new EtcdClient(buildNoopRpcClient(), new ArrayList<NodeEndpoint>());
+        new EtcdClient(buildNoopRpcClient(), new ArrayList<>());
     }
 
     @Test(expected = IllegalArgumentException.class)
@@ -68,8 +66,16 @@ public class EtcdClientFailurePathTest extends EtcdDistributedTestSkeleton {
             }
 
             @Override
-            public RpcStream openStream(String streamId, NodeEndpoint endpoint, String serviceName, String methodName, Object request, RpcMessageHandler handler) {
-                return null;
+            public void sendRequestWithRpcMessageId(NodeEndpoint endpoint,
+                                                    String serviceName,
+                                                    String methodName,
+                                                    Object request,
+                                                    String rpcMessageId,
+                                                    RpcMessageHandler handler) {
+            }
+
+            @Override
+            public void removeRpcMessageHandler(String rpcMessageId) {
             }
 
             @Override
@@ -148,8 +154,16 @@ public class EtcdClientFailurePathTest extends EtcdDistributedTestSkeleton {
             }
 
             @Override
-            public RpcStream openStream(String streamId, NodeEndpoint endpoint, String serviceName, String methodName, Object request, RpcMessageHandler handler) {
-                return null;
+            public void sendRequestWithRpcMessageId(NodeEndpoint endpoint,
+                                                    String serviceName,
+                                                    String methodName,
+                                                    Object request,
+                                                    String rpcMessageId,
+                                                    RpcMessageHandler handler) {
+            }
+
+            @Override
+            public void removeRpcMessageHandler(String rpcMessageId) {
             }
 
             @Override
