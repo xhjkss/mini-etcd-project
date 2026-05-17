@@ -1,5 +1,6 @@
 package com.xhj.etcd.kernel.etcd.store.mvcc;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +26,22 @@ import java.util.TreeMap;
  * </p>
  */
 public class KeyValueStore {
+
+    /**
+     * FNV-1a 64 位哈希初始值（offset basis）。
+     *
+     * <p>
+     * TODO:
+     *  FNV = Fowler-Noll-Vo，是一种“快、实现简单、结果稳定”的非加密哈希。
+     *  这里用它来做 KV 状态一致性对账（HashKv），不是做安全签名或防篡改。
+     * </p>
+     */
+    private static final long FNV_64_OFFSET_BASIS = 1469598103934665603L;
+
+    /**
+     * FNV-1a 64 位哈希乘数（prime）。
+     */
+    private static final long FNV_64_PRIME = 1099511628211L;
 
     /**
      * key -> 历史记录（按 modRevision 升序）。
@@ -67,6 +84,64 @@ public class KeyValueStore {
      */
     public long compactRevision() {
         return compactRevision;
+    }
+
+    /**
+     * 计算指定 revision 下的状态机哈希。
+     *
+     * <p>哈希只覆盖该 revision 下的可见 key/value 状态，不把当前 revision 号本身混入哈希值，避免
+     * “状态相同但写时钟不同”时产生不必要的哈希差异。</p>
+     *
+     * <p>
+     * TODO:
+     *  小白可按下面理解该哈希流程：
+     *  1) 先用固定初始值 FNV_64_OFFSET_BASIS 作为起点；
+     *  2) 再按“确定顺序”把每个可见记录的字段喂进哈希（key、value、createRevision、modRevision、version、leaseId）；
+     *  3) 每喂入一个字节都执行 FNV-1a 步骤：hash = (hash XOR byte) * prime；
+     *  4) 最终得到 long 值，作为该 revision 下状态机视图摘要。
+     * <p>
+     * 为什么能用于多节点对账：
+     * - 顺序稳定：historyByKey 是 TreeMap，遍历顺序按 key 字典序固定；
+     * - 编码稳定：字符串统一 UTF-8，数字统一按固定字节序展开；
+     * - 输入一致时输出一致，便于快速发现状态分歧。
+     * </p>
+     *
+     * @param requestedRevision 目标 revision，0 表示当前最新 revision
+     * @return 状态机哈希
+     */
+    public long computeKvStateHash(long requestedRevision) {
+        long revision = resolveReadRevision(requestedRevision);
+        long hash = FNV_64_OFFSET_BASIS;
+        for (Map.Entry<String, List<KeyValueRecord>> entry : historyByKey.entrySet()) {
+            KeyValueRecord visibleRecord = getVisibleRecordByRevision(entry.getKey(), revision);
+            if (visibleRecord == null) {
+                continue;
+            }
+            hash = fnvUpdateString(hash, visibleRecord.getKey());
+            hash = fnvUpdateString(hash, visibleRecord.getValue());
+            hash = fnvUpdateLong(hash, visibleRecord.getCreateRevision());
+            hash = fnvUpdateLong(hash, visibleRecord.getModRevision());
+            hash = fnvUpdateLong(hash, visibleRecord.getVersion());
+            hash = fnvUpdateLong(hash, visibleRecord.getLeaseId());
+        }
+        return hash;
+    }
+
+    /**
+     * 统计指定 revision 下的可见 key 数量。
+     *
+     * @param requestedRevision 目标 revision，0 表示当前最新 revision
+     * @return 可见 key 数量
+     */
+    public int countVisibleKeys(long requestedRevision) {
+        long revision = resolveReadRevision(requestedRevision);
+        int count = 0;
+        for (Map.Entry<String, List<KeyValueRecord>> entry : historyByKey.entrySet()) {
+            if (getVisibleRecordByRevision(entry.getKey(), revision) != null) {
+                count += 1;
+            }
+        }
+        return count;
     }
 
     /**
@@ -537,6 +612,77 @@ public class KeyValueStore {
     private long nextRevision() {
         currentRevision += 1L;
         return currentRevision;
+    }
+
+    /**
+     * 更新 FNV-1a 哈希（字节数组）。
+     *
+     * <p>
+     * 先写入长度，再写入内容，避免不同输入产生同一字节拼接歧义。
+     * 例如：["ab","c"] 与 ["a","bc"]，如果不写长度可能被错误视为同一串输入。
+     * </p>
+     *
+     * <p>这里与 fnvUpdateLong / fnvUpdateString 构成最小工具集，避免过度拆分为多层小函数。</p>
+     */
+    private long fnvUpdateBytes(long hash, byte[] bytes) {
+        if (bytes == null) {
+            int nullMarker = -1;
+            hash ^= ((nullMarker >>> 24) & 0xffL);
+            hash *= FNV_64_PRIME;
+            hash ^= ((nullMarker >>> 16) & 0xffL);
+            hash *= FNV_64_PRIME;
+            hash ^= ((nullMarker >>> 8) & 0xffL);
+            hash *= FNV_64_PRIME;
+            hash ^= (nullMarker & 0xffL);
+            hash *= FNV_64_PRIME;
+            return hash;
+        }
+
+        int length = bytes.length;
+        hash ^= ((length >>> 24) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= ((length >>> 16) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= ((length >>> 8) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= (length & 0xffL);
+        hash *= FNV_64_PRIME;
+
+        for (byte value : bytes) {
+            hash ^= (value & 0xffL);
+            hash *= FNV_64_PRIME;
+        }
+        return hash;
+    }
+
+    /**
+     * 更新 FNV-1a 哈希。
+     */
+    private long fnvUpdateLong(long hash, long value) {
+        hash ^= ((value >>> 56) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= ((value >>> 48) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= ((value >>> 40) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= ((value >>> 32) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= ((value >>> 24) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= ((value >>> 16) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= ((value >>> 8) & 0xffL);
+        hash *= FNV_64_PRIME;
+        hash ^= (value & 0xffL);
+        hash *= FNV_64_PRIME;
+        return hash;
+    }
+
+    /**
+     * 更新 FNV-1a 哈希。
+     */
+    private long fnvUpdateString(long hash, String value) {
+        return fnvUpdateBytes(hash, value == null ? null : value.getBytes(StandardCharsets.UTF_8));
     }
 
     /**

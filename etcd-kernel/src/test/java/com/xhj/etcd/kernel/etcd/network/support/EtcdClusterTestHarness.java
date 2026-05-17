@@ -619,6 +619,8 @@ public class EtcdClusterTestHarness implements DistributedClusterHarness {
                     EtcdNode.HANDLE_ETCD_RPC_DELETE_RANGE_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME,
+                    EtcdNode.HANDLE_ETCD_RPC_KV_STATE_HASH_REQUEST_METHOD_NAME,
+                    EtcdNode.HANDLE_ETCD_RPC_NODE_STATUS_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_ETCD_RPC_LEASE_GRANT_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_ETCD_RPC_LEASE_KEEP_ALIVE_REQUEST_METHOD_NAME,
                     EtcdNode.HANDLE_ETCD_RPC_LEASE_REVOKE_REQUEST_METHOD_NAME,

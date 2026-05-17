@@ -3,6 +3,8 @@ package com.xhj.etcd.kernel.etcd.network.support;
 import com.xhj.etcd.kernel.etcd.node.EtcdNode;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.KvStateHashRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.KvStateHashResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
@@ -24,6 +26,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.NodeStatusRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.NodeStatusResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelRequest;
@@ -236,6 +240,38 @@ public final class EtcdTestSupport {
         return client.call(endpoint,
                 EtcdNode.RPC_SERVICE_NAME,
                 EtcdNode.HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 KV_STATE_HASH。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  KV_STATE_HASH 请求
+     * @return KV_STATE_HASH 响应
+     */
+    public static EtcdRpcResponse<KvStateHashResponse> callKvStateHashByRpc(RpcClient client, NodeEndpoint endpoint, KvStateHashRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_KV_STATE_HASH_REQUEST_METHOD_NAME,
+                request,
+                EtcdRpcResponse.class);
+    }
+
+    /**
+     * 通过 RPC 调用 NODE_STATUS。
+     *
+     * @param client   RPC 客户端
+     * @param endpoint 目标节点
+     * @param request  NODE_STATUS 请求
+     * @return NODE_STATUS 响应
+     */
+    public static EtcdRpcResponse<NodeStatusResponse> callNodeStatusByRpc(RpcClient client, NodeEndpoint endpoint, NodeStatusRequest request) {
+        return client.call(endpoint,
+                EtcdNode.RPC_SERVICE_NAME,
+                EtcdNode.HANDLE_ETCD_RPC_NODE_STATUS_REQUEST_METHOD_NAME,
                 request,
                 EtcdRpcResponse.class);
     }

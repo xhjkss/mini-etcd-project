@@ -21,3 +21,6 @@
 
 6. `architecture-06-watch.md`
 - Watch 长连接订阅/取消、Leader 路由、历史回放与 compact 边界取消语义说明。
+
+7. `architecture-07-diagnostic.md`
+- KvStateHash 与 NodeStatus 诊断读、字段含义、事件链路与节点运行态说明。

@@ -5,6 +5,8 @@ import com.xhj.etcd.kernel.etcd.client.watch.WatchHandle;
 import com.xhj.etcd.kernel.etcd.client.watch.WatchListener;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.KvStateHashRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.KvStateHashResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
@@ -25,14 +27,14 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.NodeStatusRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.NodeStatusResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnCompareCondition;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnCompareOperatorType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationRequest;
-import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
-import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeResponse;
@@ -132,6 +134,16 @@ public class EtcdClientApiCoverageTest extends EtcdDistributedTestSkeleton {
         assertNotNull(compactResponse);
         assertEquals(compactBumpPutResponse.getRevision(), compactResponse.getCompactRevision());
         assertEquals(compactBumpPutResponse.getRevision(), compactResponse.getCurrentRevision());
+
+        KvStateHashResponse kvStateHashResponse = leaderRoutedClient.computeKvStateHash(new KvStateHashRequest(0L));
+        assertNotNull(kvStateHashResponse);
+        assertEquals(2, kvStateHashResponse.getKeyCount());
+        assertEquals(compactResponse.getCurrentRevision(), kvStateHashResponse.getRevision());
+
+        NodeStatusResponse nodeStatusResponse = leaderRoutedClient.getNodeStatus(new NodeStatusRequest());
+        assertNotNull(nodeStatusResponse);
+        assertEquals(leaderId, nodeStatusResponse.getNodeId());
+        assertTrue(nodeStatusResponse.getCurrentRevision() >= compactResponse.getCurrentRevision());
 
         GetResponse compactCurrentGetResponse = leaderRoutedClient.get(new GetRequest("client/api/compact/keep"));
         assertNotNull(compactCurrentGetResponse);

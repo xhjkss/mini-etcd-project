@@ -26,6 +26,10 @@ import com.xhj.etcd.kernel.etcd.command.EtcdCommandRegistry;
 import com.xhj.etcd.kernel.etcd.command.EtcdCommandType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.KvStateHashRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.KvStateHashResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.NodeStatusRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.NodeStatusResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveRequest;
@@ -117,9 +121,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  *     <li>当前实现服务于 MVCC KV 与 Raft / RPC / Storage 联调闭环，不是未来完整 etcd server 基类。</li>
  *     <li>PUT、DELETE、DELETE_RANGE、TXN、COMPACT、LEASE_GRANT、LEASE_KEEP_ALIVE、LEASE_REVOKE 一定转换为 EtcdCommand 并进入 Raft propose。</li>
  *     <li>GET、RANGE 默认线性一致读会进入 Raft，显式非线性一致读或历史 revision 读取则由 etcd-event-loop 本地处理。</li>
+ *     <li>KV_STATE_HASH、NODE_STATUS 属于诊断类本地读，不进入 Raft，由 etcd-event-loop 统一调度后直接读取当前状态机 / 节点状态。</li>
  *     <li>TXN compare + success/failure 分支在一次 apply 中原子执行，失败时回滚到执行前快照。</li>
  *     <li>状态机使用 KeyValueStore 表达，快照数据只保存在 RaftSnapshot.stateMachineData 中。</li>
- *     <li>后续 HashKv、Status、SDK、Console 等能力应在独立阶段演进。</li>
+ *     <li>后续 SDK、Console 等能力应在独立阶段演进。</li>
  * </ul>
  *
  * <p>核心交互流程：</p>
@@ -357,6 +362,10 @@ public class EtcdNode {
     public static final String HANDLE_ETCD_RPC_TXN_REQUEST_METHOD_NAME = "handleEtcdRpcTxnRequest";
 
     public static final String HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME = "handleEtcdRpcCompactRequest";
+
+    public static final String HANDLE_ETCD_RPC_KV_STATE_HASH_REQUEST_METHOD_NAME = "handleEtcdRpcKvStateHashRequest";
+
+    public static final String HANDLE_ETCD_RPC_NODE_STATUS_REQUEST_METHOD_NAME = "handleEtcdRpcNodeStatusRequest";
 
     public static final String HANDLE_ETCD_RPC_LEASE_GRANT_REQUEST_METHOD_NAME = "handleEtcdRpcLeaseGrantRequest";
 
@@ -689,7 +698,7 @@ public class EtcdNode {
      * <p>处理流程：</p>
      * <p>1) 根据 event.type 取出对应 XxxRequest；</p>
      * <p>2) PUT / DELETE / DELETE_RANGE / TXN / COMPACT 必然转换为 EtcdCommand 进入 Raft；</p>
-     * <p>3) GET / RANGE / LEASE_TTL / LEASE_LIST / WATCH_SUBSCRIBE / WATCH_CANCEL 根据语义决定进入 Raft 还是本地读取；</p>
+     * <p>3) GET / RANGE / LEASE_TTL / LEASE_LIST / KV_STATE_HASH / NODE_STATUS / WATCH_SUBSCRIBE / WATCH_CANCEL 根据语义决定进入 Raft 还是本地读取；</p>
      * <p>4) 本地处理直接完成 event future，Raft 路径则等待 apply 阶段回填。</p>
      *
      * @param event Etcd 内部事件
@@ -717,6 +726,12 @@ public class EtcdNode {
                     return;
                 case COMPACT:
                     submitEtcdCommandFromEvent(event, EtcdCommandType.COMPACT, eventCodec.decodeEtcdEventData(event, EtcdEventType.COMPACT, CompactRequest.class));
+                    return;
+                case KV_STATE_HASH:
+                    processKvStateHashEvent(event);
+                    return;
+                case NODE_STATUS:
+                    processNodeStatusEvent(event);
                     return;
                 case LEASE_GRANT:
                     submitEtcdCommandFromEvent(event, EtcdCommandType.LEASE_GRANT, eventCodec.decodeEtcdEventData(event, EtcdEventType.LEASE_GRANT, LeaseGrantRequest.class));
@@ -807,6 +822,36 @@ public class EtcdNode {
         LeaseListRequest request = eventCodec.decodeEtcdEventData(event, EtcdEventType.LEASE_LIST, LeaseListRequest.class);
         LeaseListResponse response = readLeaseListRequest(request);
         completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.success(event.getEventId(), response));
+    }
+
+    /**
+     * 处理 KvStateHash 事件。
+     *
+     * <p>KvStateHash 属于诊断读，只需要读取当前节点本地状态机，不进入 Raft。</p>
+     */
+    private void processKvStateHashEvent(EtcdEvent event) {
+        KvStateHashRequest request = eventCodec.decodeEtcdEventData(event, EtcdEventType.KV_STATE_HASH, KvStateHashRequest.class);
+        try {
+            KvStateHashResponse response = readKvStateHashRequest(request);
+            completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.success(event.getEventId(), response));
+        } catch (Exception exception) {
+            completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), exception.getMessage()));
+        }
+    }
+
+    /**
+     * 处理 NodeStatus 事件。
+     *
+     * <p>NodeStatus 属于诊断读，只需要读取当前节点本地状态，不进入 Raft。</p>
+     */
+    private void processNodeStatusEvent(EtcdEvent event) {
+        NodeStatusRequest request = eventCodec.decodeEtcdEventData(event, EtcdEventType.NODE_STATUS, NodeStatusRequest.class);
+        try {
+            NodeStatusResponse response = readNodeStatusRequest(request);
+            completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.success(event.getEventId(), response));
+        } catch (Exception exception) {
+            completeEtcdEvent(event.getEventId(), EtcdCommandApplyResult.error(event.getEventId(), exception.getMessage()));
+        }
     }
 
     /**
@@ -1820,6 +1865,56 @@ public class EtcdNode {
     }
 
     /**
+     * 读取 KvStateHash 诊断结果。
+     *
+     * <p>KvStateHash 只反映当前节点本地状态机在某个 revision 下的可见视图，不参与 Raft 共识。</p>
+     *
+     * @param request KvStateHash 请求
+     * @return KvStateHash 响应
+     */
+    private KvStateHashResponse readKvStateHashRequest(KvStateHashRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("hash kv request must not be null");
+        }
+        long revision = request.getRevision();
+        long resolvedRevision = revision > 0L ? revision : keyValueStore.currentRevision();
+        long hash = keyValueStore.computeKvStateHash(revision);
+        int keyCount = keyValueStore.countVisibleKeys(revision);
+        return KvStateHashResponse.of(hash, resolvedRevision, keyValueStore.compactRevision(), keyCount);
+    }
+
+    /**
+     * 读取 NodeStatus 诊断结果。
+     *
+     * <p>NodeStatus 直接聚合当前节点的 raft / kv / lease / watch 运行态，不参与 Raft 共识。</p>
+     *
+     * @param request NodeStatus 请求
+     * @return NodeStatus 响应
+     */
+    private NodeStatusResponse readNodeStatusRequest(NodeStatusRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("status request must not be null");
+        }
+        RaftSnapshot latestSnapshot = raftNode.getLatestSnapshot();
+        long snapshotLastIncludedIndex = latestSnapshot == null ? 0L : latestSnapshot.getLastIncludedIndex();
+        long snapshotLastIncludedTerm = latestSnapshot == null ? 0L : latestSnapshot.getLastIncludedTerm();
+        return NodeStatusResponse.of(
+                nodeId,
+                raftNode.getRole(),
+                raftNode.getCurrentTerm(),
+                raftNode.getLeaderId(),
+                raftNode.getCommitIndex(),
+                lastAppliedRaftLogIndex,
+                keyValueStore.currentRevision(),
+                keyValueStore.compactRevision(),
+                keyValueStore.countVisibleKeys(0L),
+                leaseStore.size(),
+                watchStore.size(),
+                snapshotLastIncludedIndex,
+                snapshotLastIncludedTerm);
+    }
+
+    /**
      * 创建 Watch 会话。
      *
      * <p>创建阶段只负责“会话注册 + 历史回放 + 游标初始化”，不负责真正的实时推送。</p>
@@ -2538,6 +2633,24 @@ public class EtcdNode {
      */
     public EtcdRpcResponse<CompactResponse> handleEtcdRpcCompactRequest(CompactRequest request) {
         return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.COMPACT, request), CompactResponse.class);
+    }
+
+    /**
+     * 处理 KvStateHash 请求。
+     *
+     * <p>KvStateHash 只读取当前节点本地状态机，不进入 Raft。</p>
+     */
+    public EtcdRpcResponse<KvStateHashResponse> handleEtcdRpcKvStateHashRequest(KvStateHashRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.KV_STATE_HASH, request), KvStateHashResponse.class);
+    }
+
+    /**
+     * 处理 NodeStatus 请求。
+     *
+     * <p>NodeStatus 只读取当前节点本地运行态，不进入 Raft。</p>
+     */
+    public EtcdRpcResponse<NodeStatusResponse> handleEtcdRpcNodeStatusRequest(NodeStatusRequest request) {
+        return buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.NODE_STATUS, request), NodeStatusResponse.class);
     }
 
     /**

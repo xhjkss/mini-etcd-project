@@ -121,6 +121,15 @@ public class WatchStore {
     }
 
     /**
+     * 获取当前 watch 会话数量。
+     *
+     * @return watch 数量
+     */
+    public int size() {
+        return sessionByWatchId.size();
+    }
+
+    /**
      * 更新 watch 会话下一次事件读取起始 revision。
      */
     public void updateNextRevision(long watchId, long nextRevision) {

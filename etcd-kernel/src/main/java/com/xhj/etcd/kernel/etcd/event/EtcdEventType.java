@@ -61,6 +61,20 @@ public enum EtcdEventType {
     COMPACT,
 
     /**
+     * KvStateHash 事件。
+     *
+     * <p>KvStateHash 是本地诊断读，不进入 Raft；由 etcd-event-loop 统一调度并直接读取当前状态机。</p>
+     */
+    KV_STATE_HASH,
+
+    /**
+     * NodeStatus 事件。
+     *
+     * <p>NodeStatus 是本地诊断读，不进入 Raft；由 etcd-event-loop 统一调度并直接读取当前节点状态。</p>
+     */
+    NODE_STATUS,
+
+    /**
      * LeaseGrant 事件。
      *
      * <p>Lease 发放属于写操作，必须通过 Raft apply 串行推进。</p>

@@ -11,6 +11,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.CompactResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.KvStateHashRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.KvStateHashResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantRequest;
@@ -27,6 +29,8 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.NodeStatusRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.NodeStatusResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeRequest;
@@ -46,7 +50,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * EtcdClient
  *
  * @author XJks
- * @description 当前阶段 Etcd 客户端，覆盖 MVCC KV 核心 API（含历史压缩）。
+ * @description 当前阶段 Etcd 客户端，覆盖 MVCC KV、Txn、Compact 和诊断类 API。
  */
 public class EtcdClient {
 
@@ -186,6 +190,24 @@ public class EtcdClient {
      */
     public CompactResponse compact(CompactRequest request) {
         return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_COMPACT_REQUEST_METHOD_NAME, request, CompactResponse.class);
+    }
+
+    /**
+     * KvStateHash 诊断。
+     *
+     * <p>KvStateHash 只读取当前节点本地状态机，不走 leader 路由。</p>
+     */
+    public KvStateHashResponse computeKvStateHash(KvStateHashRequest request) {
+        return callCurrentEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_KV_STATE_HASH_REQUEST_METHOD_NAME, request, KvStateHashResponse.class);
+    }
+
+    /**
+     * NodeStatus 诊断。
+     *
+     * <p>NodeStatus 只读取当前节点本地运行态，不走 leader 路由。</p>
+     */
+    public NodeStatusResponse getNodeStatus(NodeStatusRequest request) {
+        return callCurrentEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_NODE_STATUS_REQUEST_METHOD_NAME, request, NodeStatusResponse.class);
     }
 
     /**
