@@ -1,5 +1,7 @@
 package com.xhj.etcd.rpc;
 
+import io.netty.channel.ChannelId;
+
 /**
  * RpcMessageHandlerRegistration
  *
@@ -21,15 +23,23 @@ public class RpcMessageHandlerRegistration {
     private final RpcMessageHandler handler;
 
     /**
+     * 当前注册关系绑定的连接 ID。
+     *
+     * <p>TODO: 修复“某一条连接断开误通知全部 handler”的 bug：通过在注册时记录 ChannelId，连接关闭时只回调该连接上的 handler。</p>
+     */
+    private final ChannelId channelId;
+
+    /**
      * 消息处理器注册表。
      *
      * <p>Registration 不直接维护注册容器，只通过 registry 完成精确注销。</p>
      */
     private final RpcMessageHandlerRegistry registry;
 
-    public RpcMessageHandlerRegistration(String rpcMessageId, RpcMessageHandler handler, RpcMessageHandlerRegistry registry) {
+    public RpcMessageHandlerRegistration(String rpcMessageId, RpcMessageHandler handler, ChannelId channelId, RpcMessageHandlerRegistry registry) {
         this.rpcMessageId = rpcMessageId;
         this.handler = handler;
+        this.channelId = channelId;
         this.registry = registry;
     }
 
@@ -39,6 +49,10 @@ public class RpcMessageHandlerRegistration {
 
     public RpcMessageHandler getHandler() {
         return handler;
+    }
+
+    public ChannelId getChannelId() {
+        return channelId;
     }
 
     /**

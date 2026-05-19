@@ -2,6 +2,7 @@ package com.xhj.etcd.rpc.netty;
 
 import com.xhj.etcd.rpc.RpcMessage;
 import com.xhj.etcd.rpc.core.ClientRpcMessageDispatcher;
+import io.netty.channel.ChannelId;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 
@@ -51,7 +52,8 @@ public class NettyRpcClientHandler extends SimpleChannelInboundHandler<RpcMessag
      */
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
-        messageDispatcher.dispatchConnectionClosed(new IllegalStateException("netty rpc channel inactive"));
+        ChannelId closedChannelId = ctx.channel() == null ? null : ctx.channel().id();
+        messageDispatcher.dispatchConnectionClosed(new IllegalStateException("netty rpc channel inactive"), closedChannelId);
     }
 
     /**

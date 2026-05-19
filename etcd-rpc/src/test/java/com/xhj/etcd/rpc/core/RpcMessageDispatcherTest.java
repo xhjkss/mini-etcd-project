@@ -6,6 +6,7 @@ import com.xhj.etcd.rpc.RpcMessageHandlerRegistration;
 import com.xhj.etcd.rpc.RpcMessageHandlerRegistry;
 import com.xhj.etcd.rpc.RpcMessageType;
 import com.xhj.etcd.serializer.impl.JdkSerializer;
+import io.netty.channel.ChannelId;
 import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.Assert;
 import org.junit.Test;
@@ -17,7 +18,7 @@ public class RpcMessageDispatcherTest {
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
         ClientRpcMessageDispatcher dispatcher = new ClientRpcMessageDispatcher(registry);
         RecordingRpcMessageHandler handler = new RecordingRpcMessageHandler();
-        registry.register("rpc-1", handler);
+        registry.register("rpc-1", handler, null);
 
         RpcMessage message = message("rpc-1", RpcMessageType.REQUEST);
         dispatcher.dispatch(message);
@@ -32,12 +33,30 @@ public class RpcMessageDispatcherTest {
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
         ClientRpcMessageDispatcher dispatcher = new ClientRpcMessageDispatcher(registry);
         RecordingRpcMessageHandler handler = new RecordingRpcMessageHandler();
-        registry.register("rpc-2", handler);
+        registry.register("rpc-2", handler, null);
 
         RpcMessage message = message("rpc-2", RpcMessageType.RESPONSE);
         dispatcher.dispatch(message);
 
         Assert.assertSame(message, handler.message);
+    }
+
+    @Test
+    public void shouldOnlyNotifyHandlersOnClosedChannel() {
+        RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
+        ClientRpcMessageDispatcher dispatcher = new ClientRpcMessageDispatcher(registry);
+
+        RecordingRpcMessageHandler channelOneHandler = new RecordingRpcMessageHandler();
+        RecordingRpcMessageHandler channelTwoHandler = new RecordingRpcMessageHandler();
+        ChannelId channelOneId = new FakeChannelId("channel-1");
+        ChannelId channelTwoId = new FakeChannelId("channel-2");
+        registry.register("rpc-11", channelOneHandler, channelOneId);
+        registry.register("rpc-22", channelTwoHandler, channelTwoId);
+
+        dispatcher.dispatchConnectionClosed(new IllegalStateException("closed"), channelOneId);
+
+        Assert.assertNotNull(channelOneHandler.cause);
+        Assert.assertNull(channelTwoHandler.cause);
     }
 
     @Test
@@ -86,6 +105,7 @@ public class RpcMessageDispatcherTest {
 
     private static class RecordingRpcMessageHandler implements RpcMessageHandler {
         private RpcMessage message;
+        private Throwable cause;
 
         @Override
         public void handle(RpcMessage message, RpcMessageHandlerRegistration registration) {
@@ -94,6 +114,51 @@ public class RpcMessageDispatcherTest {
 
         @Override
         public void handleConnectionClosed(Throwable cause, RpcMessageHandlerRegistration registration) {
+            this.cause = cause;
+        }
+    }
+
+    private static class FakeChannelId implements ChannelId {
+
+        private final String value;
+
+        private FakeChannelId(String value) {
+            this.value = value;
+        }
+
+        @Override
+        public String asShortText() {
+            return value;
+        }
+
+        @Override
+        public String asLongText() {
+            return value;
+        }
+
+        @Override
+        public int compareTo(ChannelId otherChannelId) {
+            if (otherChannelId == null) {
+                return 1;
+            }
+            return asLongText().compareTo(otherChannelId.asLongText());
+        }
+
+        @Override
+        public boolean equals(Object object) {
+            if (this == object) {
+                return true;
+            }
+            if (!(object instanceof FakeChannelId)) {
+                return false;
+            }
+            FakeChannelId other = (FakeChannelId) object;
+            return value.equals(other.value);
+        }
+
+        @Override
+        public int hashCode() {
+            return value.hashCode();
         }
     }
 }

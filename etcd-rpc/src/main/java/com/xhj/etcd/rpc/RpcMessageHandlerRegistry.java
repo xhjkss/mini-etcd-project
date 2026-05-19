@@ -1,5 +1,7 @@
 package com.xhj.etcd.rpc;
 
+import io.netty.channel.ChannelId;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -23,23 +25,21 @@ public class RpcMessageHandlerRegistry {
     private final Map<String, RpcMessageHandlerRegistration> registrationMap = new ConcurrentHashMap<>();
 
     /**
-     * 注册消息处理器。
-     *
-     * <p>同一个 rpcMessageId 重复注册时，新注册关系会覆盖旧注册关系。
-     * 调用方应持有返回的 RpcMessageHandlerRegistration，并在请求完成、流关闭或超时后主动 remove。</p>
+     * 注册消息处理器（带连接 ID）。
      *
      * @param rpcMessageId RPC 消息 ID
      * @param handler      消息处理器
+     * @param channelId    注册时绑定的连接 ID，可为空
      * @return 处理器注册关系
      */
-    public RpcMessageHandlerRegistration register(String rpcMessageId, RpcMessageHandler handler) {
+    public RpcMessageHandlerRegistration register(String rpcMessageId, RpcMessageHandler handler, ChannelId channelId) {
         if (rpcMessageId == null || rpcMessageId.trim().length() == 0) {
             throw new IllegalArgumentException("rpcMessageId must not be empty");
         }
         if (handler == null) {
             throw new IllegalArgumentException("handler must not be null");
         }
-        RpcMessageHandlerRegistration registration = new RpcMessageHandlerRegistration(rpcMessageId, handler, this);
+        RpcMessageHandlerRegistration registration = new RpcMessageHandlerRegistration(rpcMessageId, handler, channelId, this);
         registrationMap.put(rpcMessageId, registration);
         return registration;
     }

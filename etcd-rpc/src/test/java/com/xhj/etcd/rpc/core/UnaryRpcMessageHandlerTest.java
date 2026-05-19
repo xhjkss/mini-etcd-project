@@ -17,7 +17,7 @@ public class UnaryRpcMessageHandlerTest {
         JdkSerializer serializer = new JdkSerializer();
         UnaryRpcMessageHandler<EchoResponse> handler = new UnaryRpcMessageHandler<>(serializer, EchoResponse.class);
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         EchoResponse response = new EchoResponse();
         response.setMessage("ok");
@@ -32,7 +32,7 @@ public class UnaryRpcMessageHandlerTest {
         JdkSerializer serializer = new JdkSerializer();
         UnaryRpcMessageHandler<String> handler = new UnaryRpcMessageHandler<>(serializer, String.class);
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         handler.handle(message("rpc-1", RpcMessageType.HEARTBEAT, serializer.serialize("OK"), null), registration);
 
@@ -44,7 +44,7 @@ public class UnaryRpcMessageHandlerTest {
     public void shouldFailWhenErrorMessageArrives() {
         UnaryRpcMessageHandler<EchoResponse> handler = new UnaryRpcMessageHandler<>(new JdkSerializer(), EchoResponse.class);
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         handler.handle(message("rpc-1", RpcMessageType.ERROR, null, "service not found"), registration);
 
@@ -56,7 +56,7 @@ public class UnaryRpcMessageHandlerTest {
     public void shouldFailWhenUnsupportedStreamMessageArrives() {
         UnaryRpcMessageHandler<EchoResponse> handler = new UnaryRpcMessageHandler<>(new JdkSerializer(), EchoResponse.class);
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         handler.handle(message("rpc-1", RpcMessageType.STREAM, null, null), registration);
 
@@ -68,7 +68,7 @@ public class UnaryRpcMessageHandlerTest {
     public void shouldFailWhenConnectionClosed() {
         UnaryRpcMessageHandler<EchoResponse> handler = new UnaryRpcMessageHandler<>(new JdkSerializer(), EchoResponse.class);
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         handler.handleConnectionClosed(new IllegalStateException("closed"), registration);
 
@@ -80,7 +80,7 @@ public class UnaryRpcMessageHandlerTest {
     public void shouldRemoveRegistrationWhenDeserializeFailed() {
         UnaryRpcMessageHandler<EchoResponse> handler = new UnaryRpcMessageHandler<>(new JdkSerializer(), EchoResponse.class);
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         handler.handle(message("rpc-1", RpcMessageType.RESPONSE, new byte[]{1, 2, 3}, null), registration);
 

@@ -13,6 +13,7 @@ import com.xhj.etcd.serializer.Serializer;
 import com.xhj.etcd.serializer.SerializerRegistry;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelId;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelInitializer;
@@ -138,12 +139,13 @@ public class NettyRpcClient implements RpcClient {
     public <T> T call(NodeEndpoint endpoint, String serviceName, String methodName, Object request, Class<T> responseClass) {
         String rpcMessageId = nextRpcMessageId();
         UnaryRpcMessageHandler<T> handler = new UnaryRpcMessageHandler<>(serializer, responseClass);
-
+        Channel channel = channelRegistry.getOrConnect(endpoint, timeoutMillis);
+        // TODO:修复 bug：handler 注册时绑定当前 channelId。这样 channelInactive 时只会回调同一连接上的 handler，不会误伤其他连接的未完成调用。
         // 1) 先注册 handler，再发送请求，避免响应提前返回时找不到等待方。
-        registerHandler(rpcMessageId, handler);
+        registerHandler(rpcMessageId, handler, channel.id());
 
         // 2) 写出请求消息；写失败会被转换为 ERROR 消息回调到当前 handler。
-        sendRequest(endpoint, serviceName, methodName, request, rpcMessageId);
+        sendRequest(channel, serviceName, methodName, request, rpcMessageId);
 
         // 3) 业务线程等待一元响应完成。
         return handler.await(timeoutMillis);
@@ -175,14 +177,14 @@ public class NettyRpcClient implements RpcClient {
         if (rpcMessageId == null || rpcMessageId.trim().length() == 0) {
             throw new IllegalArgumentException("rpcMessageId must not be empty");
         }
-
+        Channel channel = channelRegistry.getOrConnect(endpoint, timeoutMillis);
         // 2) 调用方传入 handler 时先注册，再发送请求，避免响应先到达时找不到处理器。
         if (handler != null) {
-            registerHandler(rpcMessageId, handler);
+            registerHandler(rpcMessageId, handler, channel.id());
         }
 
         // 3) 走统一请求发送路径；写失败会由 attachWriteFailureHandler 转换为 ERROR 分发给对应 handler。
-        sendRequest(endpoint, serviceName, methodName, request, rpcMessageId);
+        sendRequest(channel, serviceName, methodName, request, rpcMessageId);
     }
 
     /**
@@ -229,9 +231,9 @@ public class NettyRpcClient implements RpcClient {
     public boolean heartbeat(NodeEndpoint endpoint) {
         String rpcMessageId = nextRpcMessageId();
         UnaryRpcMessageHandler<Object> handler = new UnaryRpcMessageHandler<>(serializer, Object.class);
-        registerHandler(rpcMessageId, handler);
         try {
             Channel channel = channelRegistry.getOrConnect(endpoint, timeoutMillis);
+            registerHandler(rpcMessageId, handler, channel.id());
             RpcMessage message = new RpcMessage();
             message.setType(RpcMessageType.HEARTBEAT);
             message.setRpcMessageId(rpcMessageId);
@@ -280,8 +282,8 @@ public class NettyRpcClient implements RpcClient {
      * @param handler      消息处理器
      * @return handler 注册关系
      */
-    private RpcMessageHandlerRegistration registerHandler(String rpcMessageId, RpcMessageHandler handler) {
-        return handlerRegistry.register(rpcMessageId, handler);
+    private RpcMessageHandlerRegistration registerHandler(String rpcMessageId, RpcMessageHandler handler, ChannelId channelId) {
+        return handlerRegistry.register(rpcMessageId, handler, channelId);
     }
 
     /**
@@ -296,17 +298,16 @@ public class NettyRpcClient implements RpcClient {
     /**
      * 发送普通 RPC 请求消息。
      *
-     * <p>该方法会同步获取或建立到目标 endpoint 的 Channel，然后写出 REQUEST 消息。
+     * <p>该方法使用调用方已获取的 Channel 写出 REQUEST 消息。
      * 如果写出失败，会通过 attachWriteFailureHandler 转换为 ERROR 消息分发给等待中的 handler。</p>
      *
-     * @param endpoint     目标节点地址
+     * @param channel      目标连接
      * @param serviceName  RPC 服务名
      * @param methodName   RPC 方法名
      * @param request      请求对象
      * @param rpcMessageId RPC 消息 ID
      */
-    private void sendRequest(NodeEndpoint endpoint, String serviceName, String methodName, Object request, String rpcMessageId) {
-        Channel channel = channelRegistry.getOrConnect(endpoint, timeoutMillis);
+    private void sendRequest(Channel channel, String serviceName, String methodName, Object request, String rpcMessageId) {
         RpcMessage message = buildRequestMessage(rpcMessageId, serviceName, methodName, request);
         ChannelFuture writeFuture = channel.writeAndFlush(message);
         attachWriteFailureHandler(rpcMessageId, writeFuture);

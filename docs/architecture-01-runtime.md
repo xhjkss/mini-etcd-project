@@ -174,6 +174,18 @@ RPC 入口方法：
 2. `ready().messagesToSend` 暴露到 `RaftReady`。
 3. `EtcdNode.sendRaftReadyMessages(ready)` 通过 RPC 发出。
 
+## 7.3 连接关闭范围控制（本次修复点）
+
+过去的边界问题是：客户端某一条 TCP 连接断开时，RPC 客户端分发器会把“连接关闭”事件广播给全部未完成 handler，可能误伤其他连接上的一元调用和 watch 会话。
+
+当前修复后，连接关闭通知按 `channelId` 精确分发：
+
+1. 注册 handler 时，记录当前请求绑定的 `channelId`。
+2. `channelInactive` 时，把断开的 `channelId` 传给客户端分发器。
+3. 分发器只回调该 `channelId` 上的 handler，不再全量广播。
+
+这样可以保证：网络故障影响范围与真实断连范围一致，不会跨连接扩散。
+
 ## 8. Ready/Advance 生命周期
 
 ```mermaid

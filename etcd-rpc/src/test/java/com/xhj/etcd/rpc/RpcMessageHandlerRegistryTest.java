@@ -12,7 +12,7 @@ public class RpcMessageHandlerRegistryTest {
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
         RecordingHandler handler = new RecordingHandler();
 
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         Assert.assertSame(registration, registry.get("rpc-1"));
         Assert.assertSame(handler, registration.getHandler());
@@ -23,13 +23,13 @@ public class RpcMessageHandlerRegistryTest {
     public void shouldRejectInvalidRegistrationArguments() {
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
         try {
-            registry.register(" ", new RecordingHandler());
+            registry.register(" ", new RecordingHandler(), null);
             Assert.fail("empty rpcMessageId should be rejected");
         } catch (IllegalArgumentException expected) {
             Assert.assertTrue(expected.getMessage().contains("rpcMessageId"));
         }
         try {
-            registry.register("rpc-1", null);
+            registry.register("rpc-1", null, null);
             Assert.fail("null handler should be rejected");
         } catch (IllegalArgumentException expected) {
             Assert.assertTrue(expected.getMessage().contains("handler"));
@@ -39,7 +39,7 @@ public class RpcMessageHandlerRegistryTest {
     @Test
     public void shouldRemoveRegistrationByRpcMessageId() {
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
-        registry.register("rpc-1", new RecordingHandler());
+        registry.register("rpc-1", new RecordingHandler(), null);
 
         registry.remove("rpc-1");
 
@@ -52,8 +52,8 @@ public class RpcMessageHandlerRegistryTest {
         RecordingHandler oldHandler = new RecordingHandler();
         RecordingHandler newHandler = new RecordingHandler();
 
-        RpcMessageHandlerRegistration oldRegistration = registry.register("rpc-1", oldHandler);
-        RpcMessageHandlerRegistration newRegistration = registry.register("rpc-1", newHandler);
+        RpcMessageHandlerRegistration oldRegistration = registry.register("rpc-1", oldHandler, null);
+        RpcMessageHandlerRegistration newRegistration = registry.register("rpc-1", newHandler, null);
 
         boolean removed = registry.removeIfMatch("rpc-1", oldRegistration);
 
@@ -66,7 +66,7 @@ public class RpcMessageHandlerRegistryTest {
     public void shouldRemoveCurrentRegistrationWhenRegistrationMatches() {
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
         RecordingHandler handler = new RecordingHandler();
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         boolean removed = registry.removeIfMatch("rpc-1", registration);
 
@@ -78,7 +78,7 @@ public class RpcMessageHandlerRegistryTest {
     public void shouldRemoveCurrentRegistrationThroughRegistrationHandle() {
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
         RecordingHandler handler = new RecordingHandler();
-        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler);
+        RpcMessageHandlerRegistration registration = registry.register("rpc-1", handler, null);
 
         registration.remove();
 
@@ -88,8 +88,8 @@ public class RpcMessageHandlerRegistryTest {
     @Test
     public void shouldReturnRegistrationSnapshotAndClearRegistry() {
         RpcMessageHandlerRegistry registry = new RpcMessageHandlerRegistry();
-        registry.register("rpc-1", new RecordingHandler());
-        registry.register("rpc-2", new RecordingHandler());
+        registry.register("rpc-1", new RecordingHandler(), null);
+        registry.register("rpc-2", new RecordingHandler(), null);
 
         List<RpcMessageHandlerRegistration> registrations = registry.listRegistrations();
         registry.clear();

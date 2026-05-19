@@ -4,6 +4,7 @@ import com.xhj.etcd.rpc.RpcMessage;
 import com.xhj.etcd.rpc.RpcMessageHandlerRegistration;
 import com.xhj.etcd.rpc.RpcMessageHandlerRegistry;
 import com.xhj.etcd.rpc.RpcMessageType;
+import io.netty.channel.ChannelId;
 
 import java.util.EnumSet;
 import java.util.List;
@@ -96,10 +97,14 @@ public class ClientRpcMessageDispatcher {
      *
      * @param cause 连接关闭原因
      */
-    public void dispatchConnectionClosed(Throwable cause) {
+    public void dispatchConnectionClosed(Throwable cause, ChannelId closedChannelId) {
+        // TODO:修复 bug：过去连接断开会通知注册表全部 handler，导致“某一条连接断开误伤其他连接上的调用”。现在按 closedChannelId 精确过滤，只通知同一连接上的 handler。
         // listRegistrations 返回快照，避免遍历过程中 handler 自己 remove 导致并发修改问题。
         List<RpcMessageHandlerRegistration> registrations = handlerRegistry.listRegistrations();
         for (RpcMessageHandlerRegistration registration : registrations) {
+            if (closedChannelId != null && !closedChannelId.equals(registration.getChannelId())) {
+                continue;
+            }
             registration.getHandler().handleConnectionClosed(cause, registration);
         }
     }
