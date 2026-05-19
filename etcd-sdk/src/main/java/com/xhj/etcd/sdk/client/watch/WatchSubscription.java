@@ -190,6 +190,13 @@ public class WatchSubscription implements WatchHandle {
                 if (response != null && response.getHeader() != null && !response.getHeader().isSuccess()) {
                     throw new IllegalStateException(response.getHeader().getMessage());
                 }
+                /**
+                 * TODO:
+                 *  BUG现象：并发重复调用 cancel() 时，当前线程可能只等到了 cancel ACK，但另一个回调线程尚未执行 terminate，导致 cancel() 返回后短时间内 isClosed() 仍可能为 false。
+                 *  原因：cancel ACK 回填（future.complete）与 terminate 不是同一条执行路径内的原子动作，两者存在微小时序窗口。
+                 *  修复：这里再次调用 close() 主动收敛本地状态；close/terminate 是幂等实现，若另一线程已关闭则不会重复副作用，未关闭则由当前线程补齐 CLOSED 收敛。
+                 */
+                close();
                 return;
             }
             return;
@@ -209,6 +216,14 @@ public class WatchSubscription implements WatchHandle {
             if (response != null && response.getHeader() != null && !response.getHeader().isSuccess()) {
                 throw new IllegalStateException(response.getHeader().getMessage());
             }
+            /**
+             * TODO:
+             *  BUG现象：主取消路径中，awaitCancelResponse() 返回后，可能先于 handleCancelResponse(...) 中的 terminate 执行完成，出现“cancel() 已返回成功，但本地句柄尚未 CLOSED”的窗口。
+             *  原因：cancel ACK 的等待线程与 RPC 入站消息处理线程并发执行，ACK 达成不等价于本地状态已完成关闭。
+             *  修复：收到成功 ACK 后立即 close()，强制把 cancel() 的返回语义收敛为“返回即本地关闭已完成或已幂等完成”。
+             *  相关路径：{@link #awaitCancelResponse()} -> {@link #handleCancelResponse(EtcdRpcResponse, WatchCancelResponse)} -> {@link #terminate(Throwable, boolean)}。
+             */
+            close();
         } catch (Exception exception) {
             close();
             throw new IllegalStateException("watch cancel failed, watchId=" + watchId, exception);
@@ -233,6 +248,14 @@ public class WatchSubscription implements WatchHandle {
      * @param message 入站消息
      */
     void handleMessage(RpcMessage message) {
+        /**
+         * TODO:
+         *  竞态场景 A（可容忍）：
+         *  terminate() 可能已把 phase 切为 CLOSED，但 registry/rpc handler 还未完全移除。
+         *  这时消息若仍被路由到当前订阅，会在下面 isClosed() 处被快速丢弃，不会进入业务回调。
+         *  后续若要根治“关闭后绝对零消息进入 handleMessage”：
+         *  需要引入更强屏障（例如单线程串行执行器或连接级顺序栅栏），仅靠本地状态位无法绝对消除并发窗口。
+         */
         if (message == null || isClosed()) {
             return;
         }
@@ -324,7 +347,7 @@ public class WatchSubscription implements WatchHandle {
             throw new IllegalStateException("watch stream received in invalid phase: " + currentPhase);
         }
 
-        // 1) 反序列化推送体并校验 watchId 归属，防止路由串线。
+        // 1) 反序列化推送体并校验 watchId 归属，防止同一 TCP 多 watch 场景下的消息串线。
         WatchNotification notification = serializer.deserialize(message.getData(), WatchNotification.class);
         if (notification == null) {
             throw new IllegalStateException("watch stream notification is null");
@@ -449,6 +472,16 @@ public class WatchSubscription implements WatchHandle {
         subscribeAckFuture.completeExceptionally(actualCause);
         cancelAckFuture.completeExceptionally(actualCause);
 
+        /**
+         * TODO:
+         *  竞态场景 B（可容忍）：
+         *  future 回填与路由移除不是同一个原子动作，二者之间存在微小时序窗口。
+         *  窗口内可能出现：
+         *  1) 消息仍被分发到该订阅（但通常会被 handleMessage 的 isClosed() 快速丢弃）；
+         *  2) 极少量 in-flight 消息已越过前置检查并继续执行一次回调。
+         *  当前实现选择“尽量压缩窗口 + 最终收敛正确”。
+         *  若未来要根治“close/cancel 后绝对零回调”，需要协议/执行模型升级（如 ACK、序列屏障、单线程串行化）。
+         */
         // 2) 再清理注册表与 rpcMessageId handler，防止后续消息继续路由到已关闭订阅。
         registry.remove(this);
         rpcClient.removeRpcMessageHandler(rpcMessageId);

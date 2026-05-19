@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -128,6 +129,102 @@ public class EtcdClientNetworkSmokeTest {
             if (handle != null) {
                 handle.close();
             }
+            client.close();
+            cluster.close();
+        }
+    }
+
+    @Test
+    public void shouldKeepSubscribeBeforeFirstNotificationUnderConcurrentPutInterleaving() throws Exception {
+        MiniEtcdCluster cluster = new MiniEtcdCluster();
+        cluster.startThreeNodeCluster();
+
+        EtcdClient client = new EtcdClient(cluster.getAllEndpoints());
+        try {
+            awaitClusterReady(client, TEST_TIMEOUT_MILLIS);
+
+            for (int round = 0; round < 20; round++) {
+                String probeKey = "smoke/watch/order/probe/" + round;
+                long baseRevision = client.put(new PutRequest(probeKey, "probe-" + round)).getRevision();
+
+                String watchKey = "smoke/watch/order/key/" + round;
+                String watchValue = "value-" + round;
+                CountDownLatch subscribedLatch = new CountDownLatch(1);
+                CountDownLatch notificationLatch = new CountDownLatch(1);
+                AtomicLong subscribedNanoTime = new AtomicLong(0L);
+                AtomicLong firstNotificationNanoTime = new AtomicLong(0L);
+                AtomicReference<Throwable> listenerError = new AtomicReference<>();
+                AtomicReference<WatchHandle> watchHandleRef = new AtomicReference<>();
+
+                WatchSubscribeRequest subscribeRequest = new WatchSubscribeRequest();
+                subscribeRequest.setStartKey(watchKey);
+                subscribeRequest.setPrefixMatch(false);
+                subscribeRequest.setStartRevision(baseRevision + 1L);
+                subscribeRequest.setMaxEvents(16);
+
+                Thread watchThread = new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            watchHandleRef.set(client.watch(subscribeRequest, new WatchListener() {
+                                @Override
+                                public void onSubscribed(WatchSubscribeResponse response) {
+                                    subscribedNanoTime.compareAndSet(0L, System.nanoTime());
+                                    subscribedLatch.countDown();
+                                }
+
+                                @Override
+                                public void onNotification(WatchNotification response) {
+                                    if (response == null || response.getEvents() == null) {
+                                        return;
+                                    }
+                                    for (WatchEventView eventView : response.getEvents()) {
+                                        if (eventView == null
+                                                || eventView.getKeyValue() == null
+                                                || !watchKey.equals(eventView.getKeyValue().getKey())) {
+                                            continue;
+                                        }
+                                        firstNotificationNanoTime.compareAndSet(0L, System.nanoTime());
+                                        notificationLatch.countDown();
+                                        return;
+                                    }
+                                }
+
+                                @Override
+                                public void onCanceled(WatchCancelResponse response) {
+                                }
+
+                                @Override
+                                public void onError(Throwable cause) {
+                                    listenerError.compareAndSet(null, cause);
+                                }
+                            }));
+                        } catch (Throwable throwable) {
+                            listenerError.compareAndSet(null, throwable);
+                        }
+                    }
+                }, "sdk-watch-order-round-" + round);
+                watchThread.start();
+
+                Thread.sleep(5L);
+                client.put(new PutRequest(watchKey, watchValue));
+
+                watchThread.join(5000L);
+                Assert.assertFalse("watch subscribe thread should complete, round=" + round, watchThread.isAlive());
+                Assert.assertTrue("watch subscribe ack timeout, round=" + round, subscribedLatch.await(5L, TimeUnit.SECONDS));
+                Assert.assertTrue("watch notification timeout, round=" + round, notificationLatch.await(5L, TimeUnit.SECONDS));
+                Assert.assertNull("watch listener should not report error, round=" + round, listenerError.get());
+                Assert.assertTrue("subscribe nano time should be recorded, round=" + round, subscribedNanoTime.get() > 0L);
+                Assert.assertTrue("notification nano time should be recorded, round=" + round, firstNotificationNanoTime.get() > 0L);
+                Assert.assertTrue("notification should not happen before subscribed callback, round=" + round,
+                        subscribedNanoTime.get() <= firstNotificationNanoTime.get());
+
+                WatchHandle watchHandle = watchHandleRef.get();
+                if (watchHandle != null) {
+                    watchHandle.close();
+                }
+            }
+        } finally {
             client.close();
             cluster.close();
         }

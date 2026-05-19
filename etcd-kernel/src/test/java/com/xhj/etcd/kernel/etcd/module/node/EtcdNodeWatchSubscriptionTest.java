@@ -9,10 +9,16 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchEventType;
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchNotification;
 import com.xhj.etcd.kernel.etcd.node.EtcdNode;
 import com.xhj.etcd.kernel.raft.core.RaftConfig;
 import com.xhj.etcd.kernel.raft.core.RaftRoleType;
+import com.xhj.etcd.rpc.RpcMessage;
+import com.xhj.etcd.rpc.RpcMessageType;
+import com.xhj.etcd.serializer.Serializer;
+import com.xhj.etcd.serializer.SerializerRegistry;
 import com.xhj.etcd.storage.memory.MemoryStorage;
+import io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -32,6 +38,8 @@ import static org.junit.Assert.assertTrue;
  * @description EtcdNode Watch 模块测试，覆盖订阅、回放、取消与 compact 边界行为。
  */
 public class EtcdNodeWatchSubscriptionTest {
+
+    private final Serializer serializer = SerializerRegistry.getDefaultSerializer();
 
     private EtcdNode node;
 
@@ -274,6 +282,76 @@ public class EtcdNodeWatchSubscriptionTest {
         assertTrue(replayedKeys.contains("watch/range/c"));
         assertFalse(replayedKeys.contains("watch/range/a"));
         assertFalse(replayedKeys.contains("watch/range/z"));
+    }
+
+    @Test
+    public void shouldKeepWatchSessionWhenPushNotReadyAndWritesAreApplied() throws Exception {
+        awaitLeader(node, 3000L);
+
+        WatchSubscribeRequest subscribeRequest = new WatchSubscribeRequest();
+        subscribeRequest.setStartKey("watch/push-ready/skip/");
+        subscribeRequest.setPrefixMatch(true);
+        subscribeRequest.setStartRevision(0L);
+        WatchSubscribeResponse subscribeResponse = requireSuccess(node.handleEtcdRpcWatchSubscribeRequest(
+                subscribeRequest,
+                null,
+                "watch-test-subscribe-push-ready-skip")).getBody();
+        assertNotNull(subscribeResponse);
+
+        // 响应未走真实 RPC 写回回调前，notificationPushEnabled=false；此时写入不应把会话误判为失效并自动取消。
+        assertTrue(node.handleEtcdRpcPutRequest(new PutRequest("watch/push-ready/skip/k1", "v1")).getHeader().isSuccess());
+        WatchCancelResponse cancelResponse = requireSuccess(node.handleEtcdRpcWatchCancelRequest(
+                new WatchCancelRequest(subscribeResponse.getWatchId()))).getBody();
+        assertNotNull(cancelResponse);
+        assertTrue(cancelResponse.isCanceled());
+    }
+
+    @Test
+    public void shouldSendWatchResponseThenWatchStreamOnSameOutboxChannel() throws Exception {
+        awaitLeader(node, 3000L);
+
+        EmbeddedChannel channel = new EmbeddedChannel();
+        String subscribeRpcMessageId = "watch-test-subscribe-callback-1";
+        WatchSubscribeRequest subscribeRequest = new WatchSubscribeRequest();
+        subscribeRequest.setStartKey("watch/push-ready/activate/");
+        subscribeRequest.setPrefixMatch(true);
+        subscribeRequest.setStartRevision(0L);
+        EtcdRpcResponse<WatchSubscribeResponse> subscribeCallResult = node.handleEtcdRpcWatchSubscribeRequest(
+                subscribeRequest,
+                channel,
+                subscribeRpcMessageId);
+        // 通过真实 RPC 路径（含 channel + rpcMessageId）时，subscribe RESPONSE 由 outbox 发送，方法返回 null。
+        assertTrue(subscribeCallResult == null);
+
+        channel.runPendingTasks();
+        RpcMessage subscribeResponseMessage = channel.readOutbound();
+        assertNotNull(subscribeResponseMessage);
+        assertEquals(RpcMessageType.RESPONSE, subscribeResponseMessage.getType());
+        assertEquals(subscribeRpcMessageId, subscribeResponseMessage.getRpcMessageId());
+
+        EtcdRpcResponse subscribeResponseEnvelope = serializer.deserialize(subscribeResponseMessage.getData(), EtcdRpcResponse.class);
+        assertNotNull(subscribeResponseEnvelope);
+        assertNotNull(subscribeResponseEnvelope.getHeader());
+        assertTrue(subscribeResponseEnvelope.getHeader().isSuccess());
+        Object subscribeResponseBody = subscribeResponseEnvelope.getBody();
+        assertTrue(subscribeResponseBody instanceof WatchSubscribeResponse);
+        long watchId = ((WatchSubscribeResponse) subscribeResponseBody).getWatchId();
+        assertTrue(watchId > 0L);
+
+        assertTrue(node.handleEtcdRpcPutRequest(new PutRequest("watch/push-ready/activate/k1", "v1")).getHeader().isSuccess());
+        channel.runPendingTasks();
+
+        RpcMessage streamMessage = channel.readOutbound();
+        assertNotNull(streamMessage);
+        assertEquals(RpcMessageType.STREAM, streamMessage.getType());
+        assertEquals(subscribeRpcMessageId, streamMessage.getRpcMessageId());
+
+        WatchNotification notification =
+                serializer.deserialize(streamMessage.getData(), WatchNotification.class);
+        assertNotNull(notification);
+        assertEquals(watchId, notification.getWatchId());
+        assertNotNull(notification.getEvents());
+        assertFalse(notification.getEvents().isEmpty());
     }
 
     private <T> EtcdRpcResponse<T> requireSuccess(EtcdRpcResponse<T> response) {

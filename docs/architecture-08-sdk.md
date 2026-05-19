@@ -47,7 +47,7 @@ classDiagram
       +leaseTtl()
       +leaseList()
       +watch()
-      +watchByEndpoint()
+      +watch(endpoint overload)
       +computeKvStateHash()
       +getNodeStatus()
       +close()
@@ -166,6 +166,13 @@ sequenceDiagram
 2. 每个 watch 用不同 `rpcMessageId`。
 3. `WatchSubscriptionRegistry` 用 map 把消息准确路由到对应订阅。
 
+## 6.4 leaderOnly 与指定 endpoint 的约束
+
+1. `watch(request, listener)`：不改写 `request.leaderOnly`，严格遵循调用方语义。
+2. `watch(request, endpoint, listener)`：用于显式指定节点观察；该模式禁止 `leaderOnly=true`，否则直接抛参错。
+3. `leaderOnly=true` 时，收到 `notLeader + leaderId` 会按 leader 跳转重试。
+4. `leaderOnly=false` 时，不做 leader 跳转，按候选节点顺序尝试。
+
 ## 7. 资源与生命周期边界
 
 `EtcdClient` 有两种构造语义：
@@ -178,6 +185,13 @@ watch 生命周期：
 1. `watch()` 成功后返回 `WatchHandle`。
 2. `cancel()` 发送取消并等待 ACK。
 3. 连接关闭或消息处理异常时，订阅会被注册表清理并关闭。
+
+### 7.1 cancel 收敛语义与可容忍边界
+
+1. `cancel()` 成功返回后，本地句柄会收敛为 `CLOSED`（当前实现保证）。
+2. 关闭路径会清理 `WatchSubscriptionRegistry` 与 RPC handler，避免后续持续路由到已关闭订阅。
+3. 在无 ACK/序列屏障协议下，极小的 in-flight 并发窗口仍可能存在，偶发尾部消息属于可容忍边界。
+4. 若业务要求“cancel 后绝对零回调”，需要协议升级（ACK、序列屏障或更强串行化模型）。
 
 ## 8. SDK 与内核测试分工
 

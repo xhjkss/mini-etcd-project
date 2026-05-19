@@ -84,8 +84,6 @@ import com.xhj.etcd.kernel.etcd.store.watch.WatchStore;
 import com.xhj.etcd.kernel.etcd.store.watch.WatchSession;
 import com.xhj.etcd.rpc.NodeEndpoint;
 import com.xhj.etcd.rpc.RpcClient;
-import com.xhj.etcd.rpc.RpcMessage;
-import com.xhj.etcd.rpc.RpcMessageType;
 import com.xhj.etcd.serializer.Serializer;
 import com.xhj.etcd.serializer.SerializerRegistry;
 import com.xhj.etcd.storage.Storage;
@@ -274,7 +272,7 @@ public class EtcdNode {
     /**
      * Etcd Watch 会话状态机。
      */
-    private final WatchStore watchStore = new WatchStore();
+    private final WatchStore watchStore;
 
     // ==================== 序列 ====================
 
@@ -422,6 +420,7 @@ public class EtcdNode {
         this.commandRegistry = new EtcdCommandRegistry();
         this.nodeEndpointRegistry = new NodeEndpointRegistry();
         this.raftRpcClient = raftRpcClient;
+        this.watchStore = new WatchStore(serializer);
         this.lastAppliedRaftLogIndex = 0L;
 
         // RaftLogState 是 RaftNode 的内存日志状态入口，启动恢复时会再根据持久化 snapshot 恢复边界。
@@ -523,6 +522,9 @@ public class EtcdNode {
 
         // 5) 清理待撤销 lease 的去重状态，避免重启后沿用旧任务标记。
         pendingLeaseRevokeMap.clear();
+
+        // 6) 清理 watch channel 写状态。
+        watchStore.clearWatchChannelWriteQueueStates();
     }
 
     // ==================== EventLoop ====================
@@ -2000,6 +2002,12 @@ public class EtcdNode {
                 continue;
             }
             long watchId = session.getWatchId();
+
+            // TODO: subscribe 响应首帧未写回成功前，不允许发送增量 STREAM。这样可以保证服务端顺序：先 subscribe RESPONSE，再 watch STREAM。
+            if (!session.isNotificationPushEnabled()) {
+                continue;
+            }
+
             Channel channel = session.getChannel();
             if (channel == null || !channel.isActive()) {
                 watchStore.cancel(watchId);
@@ -2009,7 +2017,7 @@ public class EtcdNode {
             if (session.getNextRevision() < compactRevision) {
                 // TODO: 这里不做静默丢弃，而是显式推送 compacted 取消，让客户端知道需要重建 watch。
                 watchStore.cancel(watchId);
-                sendWatchNotification(session, RpcMessageType.STREAM,
+                sendWatchNotification(session,
                         WatchNotification.compactedCancel(watchId, currentRevision, compactRevision));
                 continue;
             }
@@ -2032,7 +2040,7 @@ public class EtcdNode {
             }
             long nextRevision = computeWatchNextRevision(session.getNextRevision(), events, currentRevision);
             watchStore.updateNextRevision(watchId, nextRevision);
-            sendWatchNotification(session, RpcMessageType.STREAM,
+            sendWatchNotification(session,
                     WatchNotification.of(watchId, currentRevision, nextRevision, events));
         }
     }
@@ -2041,16 +2049,19 @@ public class EtcdNode {
      * 发送 watch 通知。
      *
      * <p>这里统一封装成 RpcMessage.STREAM，再交给 rpc 层按 rpcMessageId 找回客户端 handler。</p>
+     *
+     * <p>
+     * TODO:
+     *  当前调用线程是 EtcdNode apply/event-loop 线程。
+     *  这里不直接 writeAndFlush，而是入队到 WatchChannelWriteRegistry，
+     *  与 subscribe 首帧 RESPONSE 统一走 channel.eventLoop 单写者发送，避免跨线程直接写导致顺序抖动。
+     * </p>
      */
-    private void sendWatchNotification(WatchSession session, RpcMessageType messageType, WatchNotification response) {
+    private void sendWatchNotification(WatchSession session, WatchNotification response) {
         if (session == null || session.getChannel() == null || !session.getChannel().isActive() || response == null) {
             return;
         }
-        RpcMessage rpcMessage = new RpcMessage();
-        rpcMessage.setType(messageType);
-        rpcMessage.setRpcMessageId(session.getRpcMessageId());
-        rpcMessage.setData(serializer.serialize(response));
-        session.getChannel().writeAndFlush(rpcMessage);
+        watchStore.enqueueWatchNotification(session.getChannel(), session.getRpcMessageId(), response);
     }
 
     /**
@@ -2698,8 +2709,19 @@ public class EtcdNode {
     /**
      * 处理 WatchSubscribe 请求。
      *
-     * <p>这个方法是 watch 长连接的握手入口：RPC 层先把 subscribe 请求送进 event-loop，
-     * event-loop 返回订阅结果后，再把 watchId 绑定到当前 channel，后续实时通知才能直接写回同一条流。</p>
+     * <p>这个方法是 watch 长连接握手入口，整体流程如下：</p>
+     * <ol>
+     *     <li>先按 leaderOnly 语义做角色校验（仅 leader 可受理时，follower 直接返回 notLeader）。</li>
+     *     <li>把 subscribe 请求投递到 etcd-event-loop，创建 watch 会话并得到 WatchSubscribeResponse。</li>
+     *     <li>若握手成功，则把 watchId 绑定到当前 channel + rpcMessageId，用于后续同一 TCP 下多 watch 复用路由。</li>
+     *     <li>先入队首帧 subscribe RESPONSE，再启用该 watch 的 notificationPushEnabled，确保服务端发送顺序稳定。</li>
+     * </ol>
+     *
+     * <p>
+     * TODO:
+     *  该方法运行在线程池（RpcRequestExecutor 业务线程）中，而后续 watch STREAM 推送来自EtcdNode apply/event-loop 线程；两类线程会并发写同一 channel。
+     *  因此这里不直接 writeAndFlush，而是统一入队到 WatchChannelWriteRegistry，由 channel.eventLoop 串行发送。
+     * </p>
      */
     public EtcdRpcResponse<WatchSubscribeResponse> handleEtcdRpcWatchSubscribeRequest(WatchSubscribeRequest request, Channel channel, String rpcMessageId) {
         if (request != null && request.isLeaderOnly() && getRole() != RaftRoleType.LEADER) {
@@ -2707,16 +2729,47 @@ public class EtcdNode {
             return EtcdRpcResponse.fromApplyResult(EtcdCommandApplyResult.notLeader(raftNode.getLeaderId()), null);
         }
 
+        // 1) 进入 etcd-event-loop 完成 watch 会话创建（包含参数校验、startRevision 计算等）。
         EtcdRpcResponse<WatchSubscribeResponse> response = buildRpcResponse(submitEtcdEventAndWait(EtcdEventType.WATCH_SUBSCRIBE, request), WatchSubscribeResponse.class);
-        if (response != null && response.getHeader() != null && response.getHeader().isSuccess()
-                && response.getBody() != null && response.getBody().getWatchId() > 0L && channel != null) {
-            // TODO: 同一个 channel 可以承载多个 watchId，这里只追加绑定，不独占 channel。
-            // 客户端多次 watch 在 RPC 层会复用同一 TCP；服务端据此把多个 watch 会话挂到同一 channelId，
-            // rpcMessageId 用于把服务端推送路由回客户端对应的 watch 路由上下文。
-            // 只有在订阅成功后才绑定 channel，避免失败请求占用 stream 资源。
-            watchStore.bindWatchChannel(response.getBody().getWatchId(), channel, rpcMessageId);
+        if (response == null || response.getHeader() == null || !response.getHeader().isSuccess()
+                || response.getBody() == null || response.getBody().getWatchId() <= 0L
+                || channel == null || rpcMessageId == null || rpcMessageId.trim().isEmpty()) {
+            // 2) 任一前置条件不满足时，走普通一元响应路径，交由 RpcRequestExecutor 直接回写该 response。
+            return response;
         }
-        return response;
+
+        // 3) 握手成功后，绑定 watchId -> (channel, rpcMessageId)。
+        //    一个 channel（一条 TCP）可以绑定多个 watchId；rpcMessageId 用于区分同一 TCP 上不同 watch 路由。
+        long watchId = response.getBody().getWatchId();
+        watchStore.bindWatchChannel(watchId, channel, rpcMessageId);
+
+        /**
+         * TODO:
+         *  当前代码运行在线程池（RpcRequestExecutor 业务线程）中，负责把 watch subscribe 首帧 RESPONSE 入队。
+         *  后续 watch STREAM 来自 EtcdNode apply/event-loop 线程，也会并发入队同一个 channel。
+         *  先入队 RESPONSE，再启用 notificationPushEnabled，配合 channel.eventLoop 单写者发送，可保证 RESPONSE 先于 STREAM。
+         */
+        boolean enqueued = watchStore.enqueueWatchResponse(channel, rpcMessageId, response);
+        if (!enqueued) {
+            // 4) 首帧响应入队失败时，取消刚创建的 watch 会话，避免悬挂会话泄漏。
+            watchStore.cancel(watchId);
+            // 返回 response 让 RPC 层按普通失败路径回写（若连接仍可用）。
+            return response;
+        }
+
+        // 5) 只有首帧 subscribe 响应已入队，才允许该 watch 开始推送 STREAM。
+        watchStore.enableNotificationPush(watchId);
+
+        /**
+         * TODO:
+         *  返回 null 是为了显式告诉 RPC 框架“不要再自动回写同一个 RESPONSE”。
+         *  参考 {@link com.xhj.etcd.rpc.core.RpcRequestExecutor} 的 execute(...) 逻辑：
+         *      只有服务方法返回值 result != null 时，才会执行 channel.writeAndFlush(buildResponse(...))。
+         *      当前 watch subscribe 成功路径已经把首帧 RESPONSE 入队到 WatchChannelWriteRegistry，
+         *      如果这里再返回 response，会导致同一个 rpcMessageId 被重复回写两次。
+         */
+        // 6) 返回 null 告诉 RpcRequestExecutor：该响应已由 WatchChannelWriteRegistry 接管，不再重复 write。
+        return null;
     }
 
     /**

@@ -1,5 +1,8 @@
 package com.xhj.etcd.kernel.etcd.store.watch;
 
+import com.xhj.etcd.kernel.etcd.etcdrpc.WatchNotification;
+import com.xhj.etcd.rpc.RpcMessageType;
+import com.xhj.etcd.serializer.Serializer;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 
@@ -36,6 +39,18 @@ public class WatchStore {
     private final AtomicLong nextWatchId = new AtomicLong(0L);
 
     /**
+     * Watch channel 写路由注册表。
+     */
+    private final WatchChannelWriteRegistry watchChannelWriteRegistry;
+
+    public WatchStore(Serializer serializer) {
+        if (serializer == null) {
+            throw new IllegalArgumentException("serializer must not be null");
+        }
+        this.watchChannelWriteRegistry = new WatchChannelWriteRegistry(serializer);
+    }
+
+    /**
      * 创建 watch 订阅会话。
      */
     public WatchSession create(long requestedWatchId, String startKey, String endKeyExclusive, boolean prefixMatch, long nextRevision) {
@@ -48,6 +63,7 @@ public class WatchStore {
         session.setEndKeyExclusive(endKeyExclusive);
         session.setPrefixMatch(prefixMatch);
         session.setNextRevision(nextRevision);
+        session.setNotificationPushEnabled(false);
 
         while (true) {
             long watchId = resolveWatchId(requestedWatchId);
@@ -99,6 +115,59 @@ public class WatchStore {
         }
         watchIds.add(watchId);
         return copy(session);
+    }
+
+    /**
+     * 启用 watch 通知推送。
+     *
+     * <p>
+     * TODO:
+     *  watch 会话在 subscribe 响应写回成功前不允许推送 STREAM。
+     *  只有 notificationPushEnabled=true 后 publish 才会开始发送增量通知，
+     *  保证服务端先发 subscribe 响应再发事件流。
+     * </p>
+     *
+     * @param watchId watch 会话 ID
+     * @return true 表示启用成功
+     */
+    public boolean enableNotificationPush(long watchId) {
+        WatchSession session = sessionByWatchId.get(watchId);
+        if (session == null) {
+            return false;
+        }
+        session.setNotificationPushEnabled(true);
+        return true;
+    }
+
+    /**
+     * 入队 watch subscribe/cancel 等控制面响应。
+     *
+     * @param channel      目标连接
+     * @param rpcMessageId 路由消息 ID
+     * @param response     响应体
+     * @return true 表示成功入队
+     */
+    public boolean enqueueWatchResponse(Channel channel, String rpcMessageId, Object response) {
+        return watchChannelWriteRegistry.enqueue(channel, rpcMessageId, RpcMessageType.RESPONSE, response);
+    }
+
+    /**
+     * 入队 watch 事件通知。
+     *
+     * @param channel      目标连接
+     * @param rpcMessageId 路由消息 ID
+     * @param notification 通知体
+     * @return true 表示成功入队
+     */
+    public boolean enqueueWatchNotification(Channel channel, String rpcMessageId, WatchNotification notification) {
+        return watchChannelWriteRegistry.enqueue(channel, rpcMessageId, RpcMessageType.STREAM, notification);
+    }
+
+    /**
+     * 清理全部 channel 写状态。
+     */
+    public void clearWatchChannelWriteQueueStates() {
+        watchChannelWriteRegistry.clear();
     }
 
     /**
@@ -210,6 +279,7 @@ public class WatchStore {
         target.setNextRevision(source.getNextRevision());
         target.setChannel(source.getChannel());
         target.setRpcMessageId(source.getRpcMessageId());
+        target.setNotificationPushEnabled(source.isNotificationPushEnabled());
         return target;
     }
 }

@@ -288,9 +288,7 @@ public class EtcdClient implements AutoCloseable {
      * <p>TODO: watchId 是业务会话标识；rpcMessageId 是 RPC 路由标识。一个 TCP 连接上可以同时存在多个 watch，靠不同 rpcMessageId 分流。</p>
      */
     public WatchHandle watch(WatchSubscribeRequest request, WatchListener listener) {
-        if (request != null) {
-            request.setLeaderOnly(true);
-        }
+        // TODO: 默认 watch 方法尊重调用方 request 中的 leaderOnly 策略，不在 SDK 侧强行覆写。这样调用方可以明确选择“只订阅 leader”或“允许订阅 follower”。
         return watch(request, buildLeaderPreferredWatchEndpoints(), listener);
     }
 
@@ -473,6 +471,7 @@ public class EtcdClient implements AutoCloseable {
      */
     private <T> T callCurrentEtcdRequest(String methodName, Object request, Class<T> responseClass) {
         EtcdRpcResponse<T> response = callEtcdRpcResponse(currentEndpoint, methodName, request, responseClass);
+        assertEtcdRpcResponseSuccess(methodName, currentEndpoint, response);
         return response.getBody();
     }
 
@@ -489,18 +488,27 @@ public class EtcdClient implements AutoCloseable {
         for (int retryIndex = 0; retryIndex < maxLeaderRetryTimes; retryIndex++) {
             lastResponse = callEtcdRpcResponse(endpoint, methodName, request, responseClass);
             if (!lastResponse.shouldRetryLeader()) {
+                assertEtcdRpcResponseSuccess(methodName, endpoint, lastResponse);
                 currentEndpoint = endpoint;
                 return lastResponse.getBody();
             }
 
             NodeEndpoint leaderEndpoint = endpointMap.get(lastResponse.getLeaderId());
             if (leaderEndpoint == null || leaderEndpoint.endpointKey().equals(endpoint.endpointKey())) {
-                return lastResponse.getBody();
+                String leaderId = lastResponse.getLeaderId();
+                throw new IllegalStateException("leader route failed, method=" + methodName
+                        + ", currentEndpoint=" + (endpoint == null ? "null" : endpoint.endpointKey())
+                        + ", leaderId=" + leaderId
+                        + ", knownEndpoints=" + endpointMap.keySet());
             }
             endpoint = leaderEndpoint;
             currentEndpoint = leaderEndpoint;
         }
-        return lastResponse == null ? null : lastResponse.getBody();
+        if (lastResponse == null) {
+            throw new IllegalStateException("etcd rpc call failed without response, method=" + methodName);
+        }
+        assertEtcdRpcResponseSuccess(methodName, endpoint, lastResponse);
+        return lastResponse.getBody();
     }
 
     /**
@@ -526,6 +534,20 @@ public class EtcdClient implements AutoCloseable {
             throw new IllegalStateException("unexpected etcd rpc response body type, expected=" + responseClass.getName() + ", actual=" + body.getClass().getName());
         }
         return EtcdRpcResponse.of(response.getHeader(), responseClass.cast(body));
+    }
+
+    /**
+     * 校验 Etcd RPC 响应头是否成功。
+     *
+     * <p>TODO: 客户端不能只看 body；header.success=false 时必须向上抛出错误，避免出现“控制台 code=0 但 data 为 null”的假成功。</p>
+     */
+    private void assertEtcdRpcResponseSuccess(String methodName, NodeEndpoint endpoint, EtcdRpcResponse<?> response) {
+        if (response == null || response.getHeader() == null || response.getHeader().isSuccess()) {
+            return;
+        }
+        throw new IllegalStateException("etcd rpc failed, method=" + methodName
+                + ", endpoint=" + (endpoint == null ? "null" : endpoint.endpointKey())
+                + ", message=" + response.getHeader().getMessage());
     }
 
     /**

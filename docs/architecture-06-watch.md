@@ -18,7 +18,7 @@
 2. 订阅成功后，服务端事件使用 `STREAM` 消息主动推送。
 3. `watchId` 是业务会话标识，`rpcMessageId` 是 RPC 路由标识。
 4. 一个 TCP/Channel 上可以同时存在多个 watch，靠不同 `rpcMessageId` 分流。
-5. 默认 `watch(request, listener)` 要求最终落到 Leader；显式 `watch(request, endpoint, listener)` 不允许 `leaderOnly=true`。
+5. 是否要求 Leader 受理由请求中的 `leaderOnly` 字段控制，服务端据此受理或返回 `notLeader`。
 
 一句话：控制面一元请求，数据面流式推送。
 
@@ -204,7 +204,7 @@ sequenceDiagram
 
 `EtcdClient.watch(request, listener)`：
 
-1. 直接把 `leaderOnly` 设为 `true`。
+1. 客户端发送 `watch-subscribe` 控制请求并按自身路由策略选择目标节点。
 2. 优先尝试当前路由节点，若返回 `notLeader + leaderId`，则切换到 leader 重试。
 3. 为该 watch 生成独立 `watchId` 和 `rpcMessageId`。
 4. 先注册到 `WatchSubscriptionRegistry`，再发送 `subscribe` 请求，避免响应先到导致找不到订阅上下文。
@@ -221,7 +221,7 @@ sequenceDiagram
 `EtcdClient.watch(request, endpoint, listener)`：
 
 1. 调用方显式指定目标节点。
-2. 不允许 `leaderOnly=true`，否则直接拒绝。
+2. 请求参数约束由 SDK 侧负责校验，本文不展开客户端参数策略。
 3. 不做 leader 跳转，只按指定节点建立或失败。
 
 ### 5.2 取消
@@ -265,6 +265,14 @@ sequenceDiagram
 2. 否则把 `WATCH_SUBSCRIBE` 投递到 event-loop。
 3. `applyWatchSubscribeRequest` 校验参数、计算回放窗口、创建会话、构建响应。
 4. 订阅成功后调用 `watchStore.bindWatchChannel(...)` 绑定会话路由。
+5. 首帧 `WatchSubscribeResponse` 先进入 `WatchChannelWriteRegistry` 写队列，随后再启用会话推送开关。
+
+### 6.4 首帧顺序保证（当前实现）
+
+1. subscribe 成功后先发送首帧 `WatchSubscribeResponse`。
+2. 只有首帧响应已入队，才启用会话 `notificationPushEnabled`。
+3. 后续 `WatchNotification` 与首帧响应共用同一 channel 写队列串行发送。
+4. 因此服务端侧顺序稳定为：先 `WatchSubscribeResponse`，后 `WatchNotification`。
 
 ### 6.2 实时通知
 
@@ -320,7 +328,7 @@ sequenceDiagram
 ### 10.1 默认订阅
 
 1. 客户端调用 `watch(request, listener)`。
-2. 请求被标记为 `leaderOnly=true`。
+2. 客户端按自身路由策略选择目标节点并发起订阅。
 3. 若首个节点不是 Leader，客户端根据 `notLeader + leaderId` 重试。
 4. 成功后，后续写入事件通过同一订阅持续推送。
 5. 这时同一 `RpcClient` 还可以继续处理其他普通 RPC，不会被 watch 占住。
@@ -328,7 +336,7 @@ sequenceDiagram
 ### 10.2 指定节点订阅
 
 1. 客户端调用 `watch(request, endpoint, listener)`。
-2. 如果 `leaderOnly=true`，直接拒绝。
+2. 请求参数组合合法性由 SDK 负责校验后再发起订阅。
 3. 适合明确希望挂在某个节点上观察事件时使用。
 4. 这个 watch 仍然和普通 RPC 共用同一个 `RpcClient` 和同一条 TCP。
 

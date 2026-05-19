@@ -50,4 +50,15 @@ public class WatchSession implements Serializable {
      * 绑定的 rpcMessageId。
      */
     private String rpcMessageId;
+
+    /**
+     * 是否允许发送通知推送。
+     *
+     * <p>
+     * TODO:
+     *  subscribe 会话创建后先处于未激活状态，只有当 subscribe 响应首帧真正写回成功后，
+     *  才将该标记切换为 true，避免“推送先于响应”导致客户端阶段错乱。
+     * </p>
+     */
+    private boolean notificationPushEnabled;
 }
