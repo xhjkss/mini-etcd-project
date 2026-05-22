@@ -2,28 +2,27 @@
 
 ## 1. 文档范围
 
-本文只说明当前 `etcd-sdk` 已实现的真实能力：
+本文只说明当前 `etcd-sdk` 已实现的能力：
 
-1. `EtcdClient` 如何把业务请求发到集群。
-2. Leader 路由、本地读分流、连接复用的执行逻辑。
-3. watch 在“同一 TCP 连接”下的订阅、取消、推送分发。
-4. SDK 这一层和内核层的职责边界。
+1. `EtcdClient` 的请求路由与调用模型。
+2. Leader 路由与本地读分流规则。
+3. watch 在同一 TCP 连接上的多路复用机制。
+4. watch cancel 收敛语义与当前边界。
 
 ## 2. 小白先看：SDK 现在是什么
 
-当前 SDK 的对外入口就是一个类：`com.xhj.etcd.sdk.client.EtcdClient`。
+SDK 的对外入口是一个类：`com.xhj.etcd.sdk.client.EtcdClient`。
 
-你可以把它理解成：
+它负责：
 
-1. 对应用暴露统一 API（`put/get/range/txn/lease/watch`）。
-2. 帮你处理“找 Leader / 重试 Leader”这类客户端路由细节。
-3. 帮你把 watch 的控制请求和推送消息对齐到同一个会话。
+1. 暴露统一 API（`put/get/range/delete/txn/compact/lease/watch`）。
+2. 处理客户端路由（leader 重试、指定节点访问）。
+3. 管理 watch 的订阅、取消、消息分发。
 
-它不做的事：
+它不负责：
 
-1. 不实现共识协议（那是 `etcd-kernel` 的职责）。
-2. 不重写一套 RPC 传输层（复用 `etcd-rpc`）。
-3. 不再做多层套壳客户端封装。
+1. 共识协议与状态机执行（由 `etcd-kernel` 负责）。
+2. 底层传输协议实现（复用 `etcd-rpc`）。
 
 ## 3. 核心类关系
 
@@ -69,11 +68,8 @@ classDiagram
       +handleMessage()
     }
 
-    class WatchHandle {
-    }
-
-    class WatchListener {
-    }
+    class WatchHandle
+    class WatchListener
 
     EtcdClient --> WatchSubscriptionRegistry
     WatchSubscriptionRegistry --> WatchSubscription
@@ -81,11 +77,11 @@ classDiagram
     WatchSubscription --> WatchListener
 ```
 
-## 4. 一次普通请求的最短路径（以 PUT 为例）
+## 4. 普通请求最短路径（以 PUT 为例）
 
 ```mermaid
 sequenceDiagram
-    participant App as 应用
+    participant App as Application
     participant Client as EtcdClient
     participant Rpc as RpcClient
     participant Node as EtcdNode
@@ -94,43 +90,48 @@ sequenceDiagram
     Client->>Client: callLeaderRoutedEtcdRequest()
     Client->>Rpc: call(endpoint, service, method, request)
     Rpc->>Node: REQUEST
-    Node-->>Rpc: EtcdRpcResponse_PutResponse
+    Node-->>Rpc: EtcdRpcResponse(PutResponse)
     Rpc-->>Client: EtcdRpcResponse
     Client-->>App: PutResponse
 ```
 
 关键点：
 
-1. SDK 不改写业务 DTO，仍使用内核定义的 `XxxRequest/XxxResponse`。
-2. SDK 只做“路由+调用+返回体类型校验”。
-3. 是否成功由服务端响应头和业务体共同表达。
+1. SDK 不改写 `etcdrpc` 请求/响应类型。
+2. SDK 统一校验 `EtcdRpcResponse.header.success`，失败直接抛异常。
+3. 写请求只有在服务端成功返回后才算调用成功。
 
 ## 5. Leader 路由与本地读分流
 
-## 5.1 Leader 路由（写请求、Txn、Lease、Compact）
+### 5.1 Leader 路由（写请求、Txn、Lease、Compact）
 
-这些请求统一走 `callLeaderRoutedEtcdRequest`：
+这些请求走 `callLeaderRoutedEtcdRequest`：
 
-1. 从 `currentEndpoint` 开始请求。
-2. 若响应是 `notLeader + leaderId`，则跳到已知 Leader endpoint 重试。
-3. 成功后把 `currentEndpoint` 更新为可用目标，便于下次更快命中。
+1. 从 `currentEndpoint` 发起调用。
+2. 若返回 `notLeader + leaderId`，尝试跳转到已知 leader。
+3. 成功后更新 `currentEndpoint`。
 
-## 5.2 本地读分流（Get/Range）
+### 5.2 本地读分流（Get/Range）
 
-1. `linearizableRead=true`：走 Leader 路由，保证线性一致。
-2. `linearizableRead=false`：走 `callCurrentEtcdRequest`，直接请求当前 endpoint。
+1. `linearizableRead=true`：走 leader 路由。
+2. `linearizableRead=false`：走当前节点本地读。
 
-这让调用方可以明确选择“最强一致”或“本地读取”。
+### 5.3 指定节点调用
 
-## 6. Watch：同一 TCP 连接上的多订阅
+诊断或教学场景可使用指定 endpoint 的方法（如 `rangeOnEndpoint/getNodeStatusOnEndpoint`）：
 
-## 6.1 先记住三个标识
+1. 仅请求指定节点。
+2. 不更新 `currentEndpoint`，避免污染主业务路由状态。
 
-1. `endpoint`：目标节点。
-2. `watchId`：业务会话标识（谁的订阅）。
-3. `rpcMessageId`：RPC 路由标识（消息分发到哪个本地订阅对象）。
+## 6. Watch：同一 TCP 连接多订阅
 
-## 6.2 执行流程
+### 6.1 三个标识
+
+1. `endpoint`：订阅目标节点。
+2. `watchId`：业务订阅会话 ID。
+3. `rpcMessageId`：RPC 路由 ID（用于同连接多路分发）。
+
+### 6.2 订阅与推送流程
 
 ```mermaid
 sequenceDiagram
@@ -146,72 +147,78 @@ sequenceDiagram
     Client->>Reg: register(subscription)
     Sub->>Rpc: sendRequestWithRpcMessageId(subscribe)
     Rpc->>Node: REQUEST(subscribe)
-    Node-->>Rpc: RESPONSE(ack)
+    Node-->>Rpc: RESPONSE(subscribe ack)
     Rpc-->>Reg: 按 rpcMessageId 分发
     Reg-->>Sub: handleMessage(RESPONSE)
     Node-->>Rpc: STREAM(notification)
     Rpc-->>Reg: 按 rpcMessageId 分发
     Reg-->>Sub: handleMessage(STREAM)
-    App->>Sub: cancel()
-    Sub->>Rpc: sendRequestWithRpcMessageId(cancel)
 ```
 
-## 6.3 为什么能多订阅共用一条连接
+### 6.3 为什么能共用一条连接
 
-因为底层连接是按 `endpoint` 复用的，消息分发靠 `rpcMessageId` 区分。
+同一 endpoint 的连接由 RPC 层复用，watch 的多路并发靠 `rpcMessageId` 分流：
 
-同一节点上同时有多个 watch 时：
+1. 多个 watch 可以落在同一 TCP channel。
+2. 每个 watch 绑定不同 `rpcMessageId`。
+3. `WatchSubscriptionRegistry` 用 `rpcMessageId -> WatchSubscription` 精确路由。
 
-1. 连接可以是同一条 TCP channel。
-2. 每个 watch 用不同 `rpcMessageId`。
-3. `WatchSubscriptionRegistry` 用 map 把消息准确路由到对应订阅。
+### 6.4 `WatchListener` 与 `WatchHandle` 关系
 
-## 6.4 leaderOnly 与指定 endpoint 的约束
+当前实现是“一对一”：
 
-1. `watch(request, listener)`：不改写 `request.leaderOnly`，严格遵循调用方语义。
-2. `watch(request, endpoint, listener)`：用于显式指定节点观察；该模式禁止 `leaderOnly=true`，否则直接抛参错。
-3. `leaderOnly=true` 时，收到 `notLeader + leaderId` 会按 leader 跳转重试。
-4. `leaderOnly=false` 时，不做 leader 跳转，按候选节点顺序尝试。
+1. 每次 `watch(...)` 会创建一个 `WatchSubscription`（实现 `WatchHandle`）。
+2. SDK 会调用 `listener.bindWatchHandle(subscription)` 绑定该句柄。
+3. 一个 `WatchListener` 实例不应复用到多个并发 watch。
 
-## 7. 资源与生命周期边界
+### 6.5 `leaderOnly` 与指定 endpoint 约束
 
-`EtcdClient` 有两种构造语义：
+1. `watch(request, listener)`：遵循 `request.leaderOnly` 原始值，不在 SDK 强制覆写。
+2. `watch(request, endpoint, listener)`：显式指定节点模式下禁止 `leaderOnly=true`。
+3. `leaderOnly=true`：允许根据 `notLeader + leaderId` 跳转重试。
+4. `leaderOnly=false`：按候选节点顺序尝试，允许订阅 follower。
 
-1. 传入外部 `RpcClient`：`close()` 不会关闭外部客户端。
-2. 使用默认构造创建内部 `NettyRpcClient`：`close()` 会关闭该客户端。
+## 7. Watch cancel 语义与边界
 
-watch 生命周期：
+### 7.1 已保证的行为
 
-1. `watch()` 成功后返回 `WatchHandle`。
-2. `cancel()` 发送取消并等待 ACK。
-3. 连接关闭或消息处理异常时，订阅会被注册表清理并关闭。
+1. `cancel()` 会发送取消请求并等待取消 ACK。
+2. 成功路径会执行本地 `close()` 收敛，句柄进入 `CLOSED`。
+3. 关闭时会清理注册表与 rpc handler，防止后续持续路由。
 
-### 7.1 cancel 收敛语义与可容忍边界
+### 7.2 当前可容忍窗口
 
-1. `cancel()` 成功返回后，本地句柄会收敛为 `CLOSED`（当前实现保证）。
-2. 关闭路径会清理 `WatchSubscriptionRegistry` 与 RPC handler，避免后续持续路由到已关闭订阅。
-3. 在无 ACK/序列屏障协议下，极小的 in-flight 并发窗口仍可能存在，偶发尾部消息属于可容忍边界。
-4. 若业务要求“cancel 后绝对零回调”，需要协议升级（ACK、序列屏障或更强串行化模型）。
+在“无 ACK 序列屏障”的前提下，存在极小并发窗口：
 
-## 8. SDK 与内核测试分工
+1. `future` 完成与路由移除不是同一原子操作。
+2. 极少量 in-flight 消息可能在关闭边界附近到达。
+3. 这类尾部消息属于当前设计的可容忍边界。
 
-当前分工是：
+若业务要求“cancel 返回后绝对零回调”，需要协议增强（序列屏障或更强串行化）。
 
-1. `etcd-kernel`：负责完整分布式语义和边界场景测试。
-2. `etcd-sdk`：负责客户端契约与轻量真实网络 smoke。
+## 8. `close()` 语义（当前实现）
 
-SDK 当前测试文件：
+当前 `EtcdClient.close()` 会直接调用 `rpcClient.shutdown()`。
 
-1. `EtcdClientSdkBehaviorTest`：构造与资源生命周期契约。
-2. `EtcdClientNetworkSmokeTest`：真实网络下 `put/get + watch subscribe/cancel` 最小闭环。
+这意味着：
 
-## 9. 最小使用示例
+1. 关闭 `EtcdClient` 会关闭其持有的 RPC 客户端。
+2. 若多个组件共享同一个 `RpcClient`，调用方需要自行管理关闭时机。
+
+## 9. SDK 测试分工
+
+`etcd-sdk` 当前测试重点是客户端契约，不重复覆盖内核全部分布式边界：
+
+1. `EtcdClientSdkBehaviorTest`：构造、参数、生命周期行为。
+2. `EtcdClientNetworkSmokeTest`：真实网络 smoke（含 watch 订阅/取消）。
+
+## 10. 最小使用示例
 
 ```java
 List<NodeEndpoint> endpoints = new ArrayList<>();
-endpoints.add(new NodeEndpoint("n1", "127.0.0.1", 2380));
-endpoints.add(new NodeEndpoint("n2", "127.0.0.1", 2381));
-endpoints.add(new NodeEndpoint("n3", "127.0.0.1", 2382));
+endpoints.add(new NodeEndpoint("n1", "127.0.0.1", 2379));
+endpoints.add(new NodeEndpoint("n2", "127.0.0.1", 2380));
+endpoints.add(new NodeEndpoint("n3", "127.0.0.1", 2381));
 
 EtcdClient client = new EtcdClient(endpoints);
 try {

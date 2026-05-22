@@ -1,14 +1,34 @@
 package com.xhj.etcd.sdk.client.watch;
 
+import com.xhj.etcd.rpc.NodeEndpoint;
+
 /**
  * WatchHandle
  *
  * @author XJks
  * @description Watch 长连接句柄。
- *
- * <p>TODO: 句柄只保留最小控制面能力，不公开 watchId、endpoint 等实现细节。</p>
  */
 public interface WatchHandle {
+
+    /**
+     * 获取 watchId。
+     */
+    long getWatchId();
+
+    /**
+     * 获取订阅节点 endpoint。
+     */
+    NodeEndpoint getEndpoint();
+
+    /**
+     * 获取订阅起始 key。
+     */
+    String getStartKey();
+
+    /**
+     * 是否前缀订阅。
+     */
+    boolean isPrefixMatch();
 
     /**
      * 发送取消请求。

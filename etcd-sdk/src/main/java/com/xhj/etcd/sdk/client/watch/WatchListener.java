@@ -9,26 +9,51 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.WatchSubscribeResponse;
  *
  * @author XJks
  * @description Watch 长连接监听器。
+ *
+ * <p>
+ * TODO:
+ *  一个 WatchListener 实例应只绑定一个 watchHandle（与一个 watch 订阅一对一）。
+ *  不能复用同一个 WatchListener 实例去承载多个并发 watch，否则会增加回调状态串线风险。
+ * </p>
  */
-public interface WatchListener {
+public abstract class WatchListener {
+
+    /**
+     * 当前监听器绑定的 watch 句柄。
+     */
+    private volatile WatchHandle watchHandle;
+
+    /**
+     * 绑定当前监听器对应的 watch 句柄。
+     */
+    public final void bindWatchHandle(WatchHandle watchHandle) {
+        this.watchHandle = watchHandle;
+    }
+
+    /**
+     * 获取当前监听器绑定的 watch 句柄。
+     */
+    public final WatchHandle getWatchHandle() {
+        return watchHandle;
+    }
 
     /**
      * Watch 订阅成功回调。
      */
-    void onSubscribed(WatchSubscribeResponse response);
+    public abstract void onSubscribed(WatchSubscribeResponse response);
 
     /**
      * Watch 通知回调。
      */
-    void onNotification(WatchNotification response);
+    public abstract void onNotification(WatchNotification response);
 
     /**
      * Watch 取消回调。
      */
-    void onCanceled(WatchCancelResponse response);
+    public abstract void onCanceled(WatchCancelResponse response);
 
     /**
      * Watch 异常回调。
      */
-    void onError(Throwable cause);
+    public abstract void onError(Throwable cause);
 }

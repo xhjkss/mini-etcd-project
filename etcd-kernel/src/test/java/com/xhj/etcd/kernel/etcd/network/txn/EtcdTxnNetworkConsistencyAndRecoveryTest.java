@@ -23,7 +23,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -54,46 +53,43 @@ public class EtcdTxnNetworkConsistencyAndRecoveryTest extends EtcdDistributedTes
         List<String> keySpace = buildKeySpace("txn/soak/long/key-", 12);
         Map<String, String> expectedValueByKey = new HashMap<>();
 
-        runRandomScenario(seed, 120, 18, FaultInjectionType.RESTART_LEADER, new RandomScenarioStepExecutor() {
-            @Override
-            public void executeStep(int step, Random random, StringBuilder trace) throws Exception {
-                String key = keySpace.get(random.nextInt(keySpace.size()));
-                int operationCode = random.nextInt(100);
+        runRandomScenario(seed, 120, 18, FaultInjectionType.RESTART_LEADER, (step, random, trace) -> {
+            String key = keySpace.get(random.nextInt(keySpace.size()));
+            int operationCode = random.nextInt(100);
 
-                TxnRequest txnRequest;
-                String operationType;
-                if (operationCode < 70) {
-                    String updateValue = "lv-" + step + "-" + random.nextInt(100000);
-                    txnRequest = buildUnconditionalSetTxnRequest(key, updateValue);
-                    operationType = "long-set";
-                } else if (operationCode < 90) {
-                    String expectedValue = random.nextBoolean() ? expectedValueByKey.get(key) : "long-mismatch-" + step;
-                    String updateValue = "lc-" + step + "-" + random.nextInt(100000);
-                    txnRequest = buildCompareValueSetTxnRequest(key, expectedValue, updateValue);
-                    operationType = "long-compare-set";
+            TxnRequest txnRequest;
+            String operationType;
+            if (operationCode < 70) {
+                String updateValue = "lv-" + step + "-" + random.nextInt(100000);
+                txnRequest = buildUnconditionalSetTxnRequest(key, updateValue);
+                operationType = "long-set";
+            } else if (operationCode < 90) {
+                String expectedValue = random.nextBoolean() ? expectedValueByKey.get(key) : "long-mismatch-" + step;
+                String updateValue = "lc-" + step + "-" + random.nextInt(100000);
+                txnRequest = buildCompareValueSetTxnRequest(key, expectedValue, updateValue);
+                operationType = "long-compare-set";
+            } else {
+                txnRequest = buildCompareValueDeleteTxnRequest(key, expectedValueByKey.get(key));
+                operationType = "long-compare-delete";
+            }
+
+            TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, operationType);
+            if (txnResponse == null) {
+                return;
+            }
+            committedOperationCounter[0]++;
+            trace.append("step=").append(step)
+                    .append(", op=").append(operationType)
+                    .append(", txnSucceeded=").append(txnResponse.isSucceeded())
+                    .append('\n');
+
+            GetResponse linearizableResponse = executeGetWithLeaderFallback(key, trace, step);
+            if (linearizableResponse != null) {
+                String actualValue = linearizableResponse.getValue();
+                if (actualValue == null) {
+                    expectedValueByKey.remove(key);
                 } else {
-                    txnRequest = buildCompareValueDeleteTxnRequest(key, expectedValueByKey.get(key));
-                    operationType = "long-compare-delete";
-                }
-
-                TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, operationType);
-                if (txnResponse == null) {
-                    return;
-                }
-                committedOperationCounter[0]++;
-                trace.append("step=").append(step)
-                        .append(", op=").append(operationType)
-                        .append(", txnSucceeded=").append(txnResponse.isSucceeded())
-                        .append('\n');
-
-                GetResponse linearizableResponse = executeGetWithLeaderFallback(key, trace, step);
-                if (linearizableResponse != null) {
-                    String actualValue = linearizableResponse.getValue();
-                    if (actualValue == null) {
-                        expectedValueByKey.remove(key);
-                    } else {
-                        expectedValueByKey.put(key, actualValue);
-                    }
+                    expectedValueByKey.put(key, actualValue);
                 }
             }
         }, operationTrace);
@@ -121,63 +117,60 @@ public class EtcdTxnNetworkConsistencyAndRecoveryTest extends EtcdDistributedTes
             expectedValueByKey.put(key, value);
         }
 
-        runRandomScenario(seed, 70, 14, FaultInjectionType.RESTART_FOLLOWER, new RandomScenarioStepExecutor() {
-            @Override
-            public void executeStep(int step, Random random, StringBuilder trace) throws Exception {
-                String key = keySpace.get(random.nextInt(keySpace.size()));
-                int operationCode = random.nextInt(100);
+        runRandomScenario(seed, 70, 14, FaultInjectionType.RESTART_FOLLOWER, (step, random, trace) -> {
+            String key = keySpace.get(random.nextInt(keySpace.size()));
+            int operationCode = random.nextInt(100);
 
-                if (operationCode < 65) {
-                    String modelValue = expectedValueByKey.get(key);
-                    String expectedValue = random.nextBoolean() ? modelValue : "mismatch-" + step;
-                    String updateValue = "rv-" + step + "-" + random.nextInt(10000);
-                    TxnRequest txnRequest = buildCompareValueSetTxnRequest(key, expectedValue, updateValue);
-                    TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "compare-set");
-                    if (txnResponse == null) {
-                        return;
-                    }
-                    if (txnResponse.isSucceeded()) {
-                        compareResultCounter[0]++;
-                    } else {
-                        compareResultCounter[1]++;
-                    }
-                    trace.append("step=").append(step).append(", op=compare-set, key=").append(key)
-                            .append(", expected=").append(expectedValue)
-                            .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
-                } else if (operationCode < 85) {
-                    String updateValue = "uv-" + step + "-" + random.nextInt(10000);
-                    TxnRequest txnRequest = buildUnconditionalSetTxnRequest(key, updateValue);
-                    TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "unconditional-set");
-                    if (txnResponse == null) {
-                        return;
-                    }
-                    trace.append("step=").append(step).append(", op=unconditional-set, key=").append(key)
-                            .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
-                } else {
-                    String modelValue = expectedValueByKey.get(key);
-                    TxnRequest txnRequest = buildCompareValueDeleteTxnRequest(key, modelValue);
-                    TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "compare-delete");
-                    if (txnResponse == null) {
-                        return;
-                    }
-                    if (txnResponse.isSucceeded()) {
-                        compareResultCounter[0]++;
-                    } else {
-                        compareResultCounter[1]++;
-                    }
-                    trace.append("step=").append(step).append(", op=compare-delete, key=").append(key)
-                            .append(", expected=").append(modelValue)
-                            .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
+            if (operationCode < 65) {
+                String modelValue = expectedValueByKey.get(key);
+                String expectedValue = random.nextBoolean() ? modelValue : "mismatch-" + step;
+                String updateValue = "rv-" + step + "-" + random.nextInt(10000);
+                TxnRequest txnRequest = buildCompareValueSetTxnRequest(key, expectedValue, updateValue);
+                TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "compare-set");
+                if (txnResponse == null) {
+                    return;
                 }
+                if (txnResponse.isSucceeded()) {
+                    compareResultCounter[0]++;
+                } else {
+                    compareResultCounter[1]++;
+                }
+                trace.append("step=").append(step).append(", op=compare-set, key=").append(key)
+                        .append(", expected=").append(expectedValue)
+                        .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
+            } else if (operationCode < 85) {
+                String updateValue = "uv-" + step + "-" + random.nextInt(10000);
+                TxnRequest txnRequest = buildUnconditionalSetTxnRequest(key, updateValue);
+                TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "unconditional-set");
+                if (txnResponse == null) {
+                    return;
+                }
+                trace.append("step=").append(step).append(", op=unconditional-set, key=").append(key)
+                        .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
+            } else {
+                String modelValue = expectedValueByKey.get(key);
+                TxnRequest txnRequest = buildCompareValueDeleteTxnRequest(key, modelValue);
+                TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "compare-delete");
+                if (txnResponse == null) {
+                    return;
+                }
+                if (txnResponse.isSucceeded()) {
+                    compareResultCounter[0]++;
+                } else {
+                    compareResultCounter[1]++;
+                }
+                trace.append("step=").append(step).append(", op=compare-delete, key=").append(key)
+                        .append(", expected=").append(modelValue)
+                        .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
+            }
 
-                GetResponse linearizableResponse = executeGetWithLeaderFallback(key, trace, step);
-                if (linearizableResponse != null) {
-                    String actualValue = linearizableResponse.getValue();
-                    if (actualValue == null) {
-                        expectedValueByKey.remove(key);
-                    } else {
-                        expectedValueByKey.put(key, actualValue);
-                    }
+            GetResponse linearizableResponse = executeGetWithLeaderFallback(key, trace, step);
+            if (linearizableResponse != null) {
+                String actualValue = linearizableResponse.getValue();
+                if (actualValue == null) {
+                    expectedValueByKey.remove(key);
+                } else {
+                    expectedValueByKey.put(key, actualValue);
                 }
             }
         }, operationTrace);
@@ -197,39 +190,36 @@ public class EtcdTxnNetworkConsistencyAndRecoveryTest extends EtcdDistributedTes
         List<String> keySpace = buildKeySpace("txn/soak/partition/key-", 8);
         Map<String, String> expectedValueByKey = new HashMap<>();
 
-        runRandomPartitionWindowScenario(seed, 64, 16, 6, null, new RandomScenarioStepExecutor() {
-            @Override
-            public void executeStep(int step, Random random, StringBuilder trace) throws Exception {
-                String key = keySpace.get(random.nextInt(keySpace.size()));
-                int operationCode = random.nextInt(100);
+        runRandomPartitionWindowScenario(seed, 64, 16, 6, null, (step, random, trace) -> {
+            String key = keySpace.get(random.nextInt(keySpace.size()));
+            int operationCode = random.nextInt(100);
 
-                if (operationCode < 75) {
-                    String updateValue = "pv-" + step + "-" + random.nextInt(10000);
-                    TxnRequest txnRequest = buildUnconditionalSetTxnRequest(key, updateValue);
-                    TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "partition-set");
-                    if (txnResponse == null) {
-                        return;
-                    }
-                    trace.append("step=").append(step).append(", op=partition-set, key=").append(key)
-                            .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
-                } else {
-                    TxnRequest txnRequest = buildCompareValueDeleteTxnRequest(key, expectedValueByKey.get(key));
-                    TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "partition-delete");
-                    if (txnResponse == null) {
-                        return;
-                    }
-                    trace.append("step=").append(step).append(", op=partition-delete, key=").append(key)
-                            .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
+            if (operationCode < 75) {
+                String updateValue = "pv-" + step + "-" + random.nextInt(10000);
+                TxnRequest txnRequest = buildUnconditionalSetTxnRequest(key, updateValue);
+                TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "partition-set");
+                if (txnResponse == null) {
+                    return;
                 }
+                trace.append("step=").append(step).append(", op=partition-set, key=").append(key)
+                        .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
+            } else {
+                TxnRequest txnRequest = buildCompareValueDeleteTxnRequest(key, expectedValueByKey.get(key));
+                TxnResponse txnResponse = executeTxnWithLeaderFallback(txnRequest, trace, step, "partition-delete");
+                if (txnResponse == null) {
+                    return;
+                }
+                trace.append("step=").append(step).append(", op=partition-delete, key=").append(key)
+                        .append(", succeeded=").append(txnResponse.isSucceeded()).append('\n');
+            }
 
-                GetResponse linearizableResponse = executeGetWithLeaderFallback(key, trace, step);
-                if (linearizableResponse != null) {
-                    String actualValue = linearizableResponse.getValue();
-                    if (actualValue == null) {
-                        expectedValueByKey.remove(key);
-                    } else {
-                        expectedValueByKey.put(key, actualValue);
-                    }
+            GetResponse linearizableResponse = executeGetWithLeaderFallback(key, trace, step);
+            if (linearizableResponse != null) {
+                String actualValue = linearizableResponse.getValue();
+                if (actualValue == null) {
+                    expectedValueByKey.remove(key);
+                } else {
+                    expectedValueByKey.put(key, actualValue);
                 }
             }
         }, operationTrace);

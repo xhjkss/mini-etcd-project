@@ -98,6 +98,16 @@ public class WatchSubscription implements WatchHandle {
     private final WatchListener listener;
 
     /**
+     * 订阅起始 key。
+     */
+    private volatile String startKey;
+
+    /**
+     * 是否前缀订阅。
+     */
+    private volatile boolean prefixMatch;
+
+    /**
      * 一次订阅/取消控制请求的等待超时时间，单位：毫秒。
      */
     private final long controlTimeoutMillis;
@@ -157,6 +167,8 @@ public class WatchSubscription implements WatchHandle {
      */
     public EtcdRpcResponse<WatchSubscribeResponse> subscribe(WatchSubscribeRequest request) {
         try {
+            this.startKey = request == null ? null : request.getStartKey();
+            this.prefixMatch = request != null && request.isPrefixMatch();
             // 1) 发送 subscribe 一元控制请求（REQUEST）。
             rpcClient.sendRequestWithRpcMessageId(
                     endpoint,
@@ -356,12 +368,8 @@ public class WatchSubscription implements WatchHandle {
             throw new IllegalStateException("watch stream watchId mismatch, expected=" + watchId + ", actual=" + notification.getWatchId());
         }
 
-        // 2) 把事件回调给业务监听器；监听器异常会在上层 catch 中触发终止。
-        listener.onNotification(notification);
-        // 3) 服务端标记 canceled 时，客户端同步关闭本地订阅。
-        if (notification.isCanceled()) {
-            terminate(null, false);
-        }
+        // 2) 把事件回调给业务监听器
+        publishNotification(notification);
     }
 
     /**
@@ -400,7 +408,7 @@ public class WatchSubscription implements WatchHandle {
             if (replayNotification != null
                     && replayNotification.getEvents() != null
                     && !replayNotification.getEvents().isEmpty()) {
-                listener.onNotification(replayNotification);
+                publishNotification(replayNotification);
             }
             return;
         }
@@ -512,4 +520,15 @@ public class WatchSubscription implements WatchHandle {
                 subscribeResponse.getNextRevision(),
                 events);
     }
+
+    /**
+     * 回调单条通知并处理 canceled 终止语义。
+     */
+    private void publishNotification(WatchNotification notification) {
+        listener.onNotification(notification);
+        if (notification.isCanceled()) {
+            terminate(null, false);
+        }
+    }
+
 }

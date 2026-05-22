@@ -13,7 +13,6 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.RangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnCompareCondition;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnCompareOperatorType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationRequest;
-import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnOperationType;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.TxnResponse;
@@ -683,7 +682,7 @@ public class EtcdCompactNetworkConsistencyAndRecoveryTest extends EtcdDistribute
                                                         String value,
                                                         long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -695,7 +694,7 @@ public class EtcdCompactNetworkConsistencyAndRecoveryTest extends EtcdDistribute
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(80L);

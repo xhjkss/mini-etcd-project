@@ -191,6 +191,16 @@ public class EtcdNode {
      */
     private static final int LEASE_REVOKE_TASK_QUEUE_CAPACITY = 64;
 
+    /**
+     * RANGE 全量读取的最小起始 key。
+     */
+    private static final String RANGE_ALL_START_KEY = "!";
+
+    /**
+     * RANGE 全量读取的结束 key（左闭右开排他上界）。
+     */
+    private static final String RANGE_ALL_END_KEY_EXCLUSIVE = "\uffff\uffff\uffff";
+
     // ==================== 基础依赖 ====================
 
     /**
@@ -1684,6 +1694,7 @@ public class EtcdNode {
      * @return 排序后的 key 列表
      */
     private RangeResponse applyRangeRequest(RangeRequest request) {
+        normalizeRangeRequestForAllKeys(request);
         List<KeyValueRecord> records = keyValueStore.range(
                 request.getStartKey(),
                 request.getEndKeyExclusive(),
@@ -1719,6 +1730,40 @@ public class EtcdNode {
         }
         long effectiveRevision = request.getRevision() > 0L ? request.getRevision() : keyValueStore.currentRevision();
         return RangeResponse.of(items, matchedCount, effectiveRevision);
+    }
+
+    /**
+     * 归一化 RANGE 请求，兼容“空 startKey 表示全量扫描”的历史调用。
+     *
+     * <p>
+     * TODO:
+     *  BUG现象：
+     *      某些调用方（例如前端静态资源缓存了旧脚本）会发送 startKey="" 的 RANGE 请求，
+     *      触发 KeyValueStore#validateKey 抛出 "key must not be empty"。
+     *  修复策略：
+     *      当 prefixMatch=false 且 startKey 为空时，统一转换为
+     *      [RANGE_ALL_START_KEY, RANGE_ALL_END_KEY_EXCLUSIVE) 全量区间，
+     *      这样既兼容旧调用，又不影响正常的单 key / 前缀 / 区间语义。
+     * </p>
+     */
+    private void normalizeRangeRequestForAllKeys(RangeRequest request) {
+        if (request == null || request.isPrefixMatch()) {
+            return;
+        }
+        if (!isBlank(request.getStartKey())) {
+            return;
+        }
+        request.setStartKey(RANGE_ALL_START_KEY);
+        if (isBlank(request.getEndKeyExclusive())) {
+            request.setEndKeyExclusive(RANGE_ALL_END_KEY_EXCLUSIVE);
+        }
+    }
+
+    /**
+     * 字符串判空工具方法。
+     */
+    private boolean isBlank(String value) {
+        return value == null || value.trim().length() == 0;
     }
 
     private DeleteRangeResponse applyDeleteRangeRequest(DeleteRangeRequest request) {

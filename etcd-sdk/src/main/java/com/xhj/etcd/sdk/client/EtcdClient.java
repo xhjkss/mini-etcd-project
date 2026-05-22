@@ -42,6 +42,7 @@ import com.xhj.etcd.rpc.netty.NettyRpcClient;
 import com.xhj.etcd.serializer.SerializerRegistry;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,11 +80,6 @@ public class EtcdClient implements AutoCloseable {
     private final RpcClient rpcClient;
 
     /**
-     * 是否由当前客户端持有并负责关闭 rpcClient。
-     */
-    private final boolean ownRpcClient;
-
-    /**
      * 客户端已知的节点地址表。
      */
     private final Map<String, NodeEndpoint> endpointMap = new LinkedHashMap<>();
@@ -112,7 +108,7 @@ public class EtcdClient implements AutoCloseable {
      * 使用单节点地址构造客户端。
      */
     public EtcdClient(RpcClient rpcClient, NodeEndpoint endpoint) {
-        this(rpcClient, singletonEndpointList(endpoint), false);
+        this(rpcClient, singletonEndpointList(endpoint));
     }
 
     /**
@@ -121,17 +117,6 @@ public class EtcdClient implements AutoCloseable {
      * <p>客户端会先登记 endpointMap，再默认使用第一个地址作为初始 currentEndpoint。</p>
      */
     public EtcdClient(RpcClient rpcClient, List<NodeEndpoint> endpoints) {
-        this(rpcClient, endpoints, false);
-    }
-
-    /**
-     * 使用默认 NettyRpcClient 构造客户端。
-     */
-    public EtcdClient(List<NodeEndpoint> endpoints) {
-        this(new NettyRpcClient(SerializerRegistry.getDefaultSerializer(), 5000L), endpoints, true);
-    }
-
-    EtcdClient(RpcClient rpcClient, List<NodeEndpoint> endpoints, boolean ownRpcClient) {
         if (rpcClient == null) {
             throw new IllegalArgumentException("rpcClient must not be null");
         }
@@ -140,12 +125,18 @@ public class EtcdClient implements AutoCloseable {
         }
 
         this.rpcClient = rpcClient;
-        this.ownRpcClient = ownRpcClient;
         for (NodeEndpoint endpoint : endpoints) {
             registerClientEndpoint(endpoint);
         }
         this.currentEndpoint = endpoints.get(0);
         this.maxLeaderRetryTimes = Math.max(1, this.endpointMap.size());
+    }
+
+    /**
+     * 使用默认 NettyRpcClient 构造客户端。
+     */
+    public EtcdClient(List<NodeEndpoint> endpoints) {
+        this(new NettyRpcClient(SerializerRegistry.getDefaultSerializer(), 5000L), endpoints);
     }
 
     /**
@@ -157,9 +148,7 @@ public class EtcdClient implements AutoCloseable {
 
     @Override
     public void close() {
-        if (ownRpcClient) {
-            rpcClient.shutdown();
-        }
+        rpcClient.shutdown();
     }
 
     // ==================== KV 操作 ====================
@@ -183,6 +172,13 @@ public class EtcdClient implements AutoCloseable {
             return callCurrentEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_GET_REQUEST_METHOD_NAME, request, GetResponse.class);
         }
         return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_GET_REQUEST_METHOD_NAME, request, GetResponse.class);
+    }
+
+    /**
+     * GET 操作（显式指定节点）。
+     */
+    public GetResponse getOnEndpoint(NodeEndpoint endpoint, GetRequest request) {
+        return callEndpointEtcdRequest(endpoint, EtcdNode.HANDLE_ETCD_RPC_GET_REQUEST_METHOD_NAME, request, GetResponse.class);
     }
 
     /**
@@ -234,6 +230,27 @@ public class EtcdClient implements AutoCloseable {
      */
     public NodeStatusResponse getNodeStatus(NodeStatusRequest request) {
         return callCurrentEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_NODE_STATUS_REQUEST_METHOD_NAME, request, NodeStatusResponse.class);
+    }
+
+    /**
+     * NodeStatus 诊断（显式指定节点）。
+     */
+    public NodeStatusResponse getNodeStatusOnEndpoint(NodeEndpoint endpoint, NodeStatusRequest request) {
+        return callEndpointEtcdRequest(endpoint, EtcdNode.HANDLE_ETCD_RPC_NODE_STATUS_REQUEST_METHOD_NAME, request, NodeStatusResponse.class);
+    }
+
+    /**
+     * KvStateHash 诊断（显式指定节点）。
+     */
+    public KvStateHashResponse computeKvStateHashOnEndpoint(NodeEndpoint endpoint, KvStateHashRequest request) {
+        return callEndpointEtcdRequest(endpoint, EtcdNode.HANDLE_ETCD_RPC_KV_STATE_HASH_REQUEST_METHOD_NAME, request, KvStateHashResponse.class);
+    }
+
+    /**
+     * Range 读取（显式指定节点）。
+     */
+    public RangeResponse rangeOnEndpoint(NodeEndpoint endpoint, RangeRequest request) {
+        return callEndpointEtcdRequest(endpoint, EtcdNode.HANDLE_ETCD_RPC_RANGE_REQUEST_METHOD_NAME, request, RangeResponse.class);
     }
 
     /**
@@ -359,6 +376,8 @@ public class EtcdClient implements AutoCloseable {
                         endpoint,
                         listener,
                         WATCH_SUBSCRIBE_ACK_TIMEOUT_MILLIS);
+                // TODO:watchListener 与 watchHandle 一对一绑定；先绑定句柄，再注册路由并发起订阅。
+                listener.bindWatchHandle(subscription);
                 // 3) 先注册路由，再发请求，避免响应先到时找不到本地订阅上下文。
                 watchSubscriptionRegistry.register(subscription);
 
@@ -476,6 +495,24 @@ public class EtcdClient implements AutoCloseable {
     }
 
     /**
+     * 调用显式指定节点的 Etcd RPC。
+     *
+     * <p>
+     * TODO:
+     *  不更新 currentEndpoint，只返回该节点的响应结果。
+     *  用于诊断/教学场景，保证主业务链路路由状态不被“指定节点查询”污染。
+     * </p>
+     */
+    private <T> T callEndpointEtcdRequest(NodeEndpoint endpoint, String methodName, Object request, Class<T> responseClass) {
+        if (endpoint == null) {
+            throw new IllegalArgumentException("endpoint must not be null");
+        }
+        EtcdRpcResponse<T> response = callEtcdRpcResponse(endpoint, methodName, request, responseClass);
+        assertEtcdRpcResponseSuccess(methodName, endpoint, response);
+        return response.getBody();
+    }
+
+    /**
      * 调用需要 Leader 路由的 Etcd RPC。
      *
      * <p>如果服务端返回 notLeader + leaderId，客户端会在已知 endpointMap 中查找 Leader 并重试。
@@ -567,6 +604,14 @@ public class EtcdClient implements AutoCloseable {
         List<NodeEndpoint> endpoints = new ArrayList<>();
         endpoints.add(endpoint);
         return endpoints;
+    }
+
+    /**
+     * 返回 endpoint 快照（只读）。
+     */
+    public List<NodeEndpoint> getEndpointsSnapshot() {
+        List<NodeEndpoint> endpointList = new ArrayList<>(endpointMap.values());
+        return Collections.unmodifiableList(endpointList);
     }
 
     /**

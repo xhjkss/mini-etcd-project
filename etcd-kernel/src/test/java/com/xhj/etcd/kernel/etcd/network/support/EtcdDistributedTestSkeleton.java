@@ -98,7 +98,7 @@ public abstract class EtcdDistributedTestSkeleton
         while (System.currentTimeMillis() < deadline) {
             try {
                 return EtcdTestSupport.callPutByRpc(harness.getTestClient(), endpoint, key, value);
-            } catch (Exception ignore) {
+            } catch (Exception | AssertionError ignore) {
             }
             Thread.sleep(80L);
         }
@@ -107,7 +107,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected void putOnLeaderWithRetry(String key, String value, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -119,7 +119,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess()) {
                     return;
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -129,7 +129,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected DeleteResponse deleteOnLeaderWithRetry(String key, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -140,7 +140,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -150,7 +150,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected RangeResponse rangeOnLeaderWithRetry(RangeRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -162,7 +162,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -172,7 +172,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected DeleteRangeResponse deleteRangeOnLeaderWithRetry(DeleteRangeRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -183,7 +183,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -193,7 +193,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected GetResponse getLinearizableFromLeaderWithRetry(String key, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -205,7 +205,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(80L);
@@ -215,7 +215,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected TxnResponse txnOnLeaderWithRetry(TxnRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -226,7 +226,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -236,7 +236,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected CompactResponse compactOnLeaderWithRetry(CompactRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -247,7 +247,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -258,7 +258,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected LeaseGrantResponse leaseGrantOnLeaderWithRetry(LeaseGrantRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -269,7 +269,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -279,7 +279,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected LeaseKeepAliveResponse leaseKeepAliveOnLeaderWithRetry(LeaseKeepAliveRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -290,7 +290,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -300,7 +300,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected LeaseRevokeResponse leaseRevokeOnLeaderWithRetry(LeaseRevokeRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -311,7 +311,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -321,7 +321,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected LeaseTtlResponse leaseTtlOnLeaderWithRetry(LeaseTtlRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -332,7 +332,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -342,7 +342,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected LeaseListResponse leaseListOnLeaderWithRetry(LeaseListRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -353,7 +353,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -363,7 +363,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected WatchSubscribeResponse watchSubscribeOnLeaderWithRetry(WatchSubscribeRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -374,7 +374,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -384,7 +384,7 @@ public abstract class EtcdDistributedTestSkeleton
 
     protected WatchCancelResponse watchCancelOnLeaderWithRetry(WatchCancelRequest request, long timeoutMillis) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMillis;
-        Exception lastException = null;
+        Throwable lastException = null;
         while (System.currentTimeMillis() < deadline) {
             try {
                 NodeEndpoint leaderEndpoint = harness.awaitLeaderEndpoint(4000L);
@@ -395,7 +395,7 @@ public abstract class EtcdDistributedTestSkeleton
                 if (response != null && response.getHeader() != null && response.getHeader().isSuccess() && response.getBody() != null) {
                     return response.getBody();
                 }
-            } catch (Exception e) {
+            } catch (Exception | AssertionError e) {
                 lastException = e;
             }
             Thread.sleep(100L);
@@ -403,4 +403,3 @@ public abstract class EtcdDistributedTestSkeleton
         throw new AssertionError("watch cancel retry timeout", lastException);
     }
 }
-

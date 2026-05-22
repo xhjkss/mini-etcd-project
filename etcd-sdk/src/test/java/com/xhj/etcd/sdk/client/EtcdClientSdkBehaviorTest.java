@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 /**
@@ -31,19 +30,9 @@ public class EtcdClientSdkBehaviorTest {
     }
 
     @Test
-    public void shouldNotShutdownExternalRpcClientOnClose() {
+    public void shouldShutdownRpcClientOnClose() {
         FakeRpcClient rpcClient = new FakeRpcClient();
         EtcdClient etcdClient = new EtcdClient(rpcClient, defaultEndpoints());
-
-        etcdClient.close();
-
-        assertFalse(rpcClient.shutdownCalled.get());
-    }
-
-    @Test
-    public void shouldShutdownOwnedRpcClientOnClose() {
-        FakeRpcClient rpcClient = new FakeRpcClient();
-        EtcdClient etcdClient = new EtcdClient(rpcClient, defaultEndpoints(), true);
 
         etcdClient.close();
 

@@ -59,9 +59,11 @@ public class WatchSubscribeRequest implements Serializable {
     /**
      * 是否要求由 Leader 处理订阅握手。
      *
-     * <p>TODO:
-     * true 时，Follower 会返回 notLeader + leaderId，客户端按 leaderId 跳转重试；
-     * false 时，允许在任意节点建立 watch，会话由该节点负责推送已提交事件。</p>
+     * <p>
+     * TODO:
+     *  true 时，Follower 会返回 notLeader + leaderId，客户端按 leaderId 跳转重试；
+     *  false 时，允许在任意节点建立 watch，会话由该节点负责推送已提交事件。
+     * </p>
      */
     private boolean leaderOnly;
 }
