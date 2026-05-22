@@ -27,3 +27,9 @@
 
 8. `architecture-08-sdk.md`
 - mini-etcd 单类客户端 `EtcdClient` 的接口、路由行为、watch 订阅与资源关闭语义说明。
+
+9. `architecture-09-console.md`
+- mini-etcd Console Web 模块的接口分组、SDK 调用链路与 watch 会话管理说明。
+
+10. `architecture-10-cluster-startup.md`
+- mini-etcd 集群启动脚本、节点参数配置与 Console 连接操作指南。

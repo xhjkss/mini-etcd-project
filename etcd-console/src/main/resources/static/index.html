@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mini Etcd Console</title>
+    <link rel="stylesheet" href="/lib/element-ui/theme-chalk/index.min.css">
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div id="app" v-cloak>
+    <el-container class="console-layout">
+        <el-aside width="220px" class="console-aside">
+            <div class="brand">
+                <div class="brand-title">Mini Etcd</div>
+                <div class="brand-subtitle">Console</div>
+            </div>
+            <el-menu :default-active="activeView" class="side-menu" background-color="#172033" text-color="#b8c2d6" active-text-color="#409EFF" @select="activeView = $event">
+                <el-menu-item v-for="item in navItems" :key="item.key" :index="item.key">
+                    <i :class="item.icon"></i><span slot="title">{{ item.label }}</span>
+                </el-menu-item>
+            </el-menu>
+            <div class="aside-box">
+                <div class="aside-label">当前操作连接</div>
+                <el-select v-model="currentNodeId" size="small" placeholder="请选择连接" filterable @change="browserRefresh" style="width:100%">
+                    <el-option v-for="conn in connections" :key="conn.nodeId" :label="connectionEndpoint(conn)" :value="conn.nodeId"></el-option>
+                </el-select>
+                <div class="aside-tip" v-if="!connections.length">暂无连接，请先进入连接管理。</div>
+            </div>
+        </el-aside>
+
+        <el-container>
+            <el-header height="64px" class="console-header">
+                <div>
+                    <div class="page-title">Mini Etcd Console</div>
+                    <div class="page-subtitle">数据浏览、集群观察与安全操作</div>
+                </div>
+                <div class="header-actions">
+                    <el-tag :type="webSocketConnected ? 'success' : 'danger'" size="medium">WebSocket：{{ webSocketConnected ? '已连接' : '未连接' }}</el-tag>
+                    <el-tag size="medium">WS诊断：{{ webSocketStatsLabel }}</el-tag>
+                    <el-tag :type="clusterHealthTagType" size="medium">集群：{{ clusterHealthLabel }}</el-tag>
+                    <el-tag size="medium">Leader：{{ leaderDisplay || '-' }}</el-tag>
+                    <el-button size="small" icon="el-icon-question" @click="onboardingGuideVisible = !onboardingGuideVisible">{{ onboardingGuideVisible ? '收起引导' : '新手引导' }}</el-button>
+                    <el-button size="small" icon="el-icon-refresh" @click="uiRefreshAll">刷新</el-button>
+                    <el-button size="small" type="primary" icon="el-icon-connection" @click="uiOpenConnectionsView">连接管理</el-button>
+                </div>
+            </el-header>
+
+            <el-main class="console-main">
+                <el-card v-if="showOnboardingGuide" shadow="never" class="module-card onboarding-card bottom-space">
+                    <div slot="header" class="card-header">
+                        <div>
+                            <div class="card-title">快速上手（3 步）</div>
+                            <div class="card-desc">按顺序完成连接、选择连接、执行操作。每一步都提供跳转入口。</div>
+                        </div>
+                        <el-button size="mini" type="text" @click="uiCloseOnboardingGuide">收起</el-button>
+                    </div>
+                    <el-steps :active="onboardingActiveStep" finish-status="success" align-center>
+                        <el-step title="连接节点" description="在连接管理中输入 host:port 并连接"></el-step>
+                        <el-step title="选择连接" description="在左侧“当前操作连接”中选择节点"></el-step>
+                        <el-step title="执行操作" description="进入数据浏览或操作中心执行操作"></el-step>
+                    </el-steps>
+                    <div class="onboarding-actions">
+                        <el-button size="mini" @click="uiOpenConnectionsView">去连接管理</el-button>
+                        <el-button size="mini" :disabled="!connections.length" @click="uiOpenBrowserView">去数据浏览</el-button>
+                        <el-button size="mini" type="primary" :disabled="!hasCurrentConnection" @click="uiOpenOperationsView">去操作中心</el-button>
+                    </div>
+                </el-card>
+                <el-alert
+                        v-if="!connections.length"
+                        type="info"
+                        :closable="false"
+                        class="bottom-space"
+                        title="快速开始：先进入“连接管理”连接一个节点（例如 127.0.0.1:2379），再回到“数据浏览”执行 Put/Get 验证。">
+                </el-alert>
+                <el-alert
+                        v-else-if="!hasCurrentConnection"
+                        type="warning"
+                        :closable="false"
+                        class="bottom-space"
+                        title="你已连接节点，但还没有选中当前操作连接。请先在左侧“当前操作连接”下拉框选择 host:port。">
+                </el-alert>
+                <section v-show="activeView === 'browser'" class="browser-page">
+                    <el-row :gutter="12" class="full-height-row">
+                        <el-col :span="8" class="full-height-col">
+                            <el-card shadow="never" class="module-card full-card">
+                                <div slot="header" class="card-header">
+                                    <div>
+                                        <div class="card-title">Key 数据目录</div>
+                                        <div class="card-desc">默认展示全部 Key，并按 / 自动组织成目录；也可以输入 Prefix 缩小范围。</div>
+                                    </div>
+                                    <div class="tree-header-actions">
+                                        <el-tag size="mini" :type="browserAutoRefreshEnabled ? 'success' : 'info'">{{ browserAutoRefreshEnabled ? '实时同步' : '手动刷新' }}</el-tag>
+                                        <el-switch v-model="browserAutoRefreshEnabled" size="mini" active-text="" inactive-text=""></el-switch>
+                                        <el-button size="mini" icon="el-icon-refresh" @click="browserRefresh(false)">刷新</el-button>
+                                    </div>
+                                </div>
+                                <el-form label-position="top" size="small" class="compact-form">
+                                    <el-form-item label="Prefix（可选，留空展示全部 Key）">
+                                        <el-input v-model.trim="browserPrefix" placeholder="留空展示全部；例如 /config/ 或 1" clearable autocomplete="off">
+                                            <el-button slot="append" icon="el-icon-search" @click="browserRefresh(false)">查询</el-button>
+                                        </el-input>
+                                    </el-form-item>
+                                </el-form>
+                                <div class="browser-sync-tip">最后同步：{{ lastBrowserRefreshAt || '尚未同步' }}</div>
+                                <el-alert v-if="browserLoadError" type="error" :closable="false" class="browser-load-error" :title="browserLoadError"></el-alert>
+                                <div class="tree-area" v-loading="browserLoading">
+                                    <el-empty v-if="!treeForElement.length" description="当前连接暂无 Key，或当前 Prefix 下暂无数据" :image-size="72"></el-empty>
+                                    <el-tree v-else :data="treeForElement" :props="treeProps" node-key="path" default-expand-all highlight-current @node-click="onTreeNodeClick">
+                                        <span class="custom-tree-node" slot-scope="{ node, data }">
+                                            <span><i :class="data.type === 'dir' ? 'el-icon-folder' : 'el-icon-document'"></i> {{ data.name }}</span>
+                                            <span class="tree-op" @click.stop>
+                                                <el-button v-if="data.type === 'dir'" type="text" size="mini" @click="kvEditorOpen('create', data.path)">新增</el-button>
+                                                <el-button v-if="data.type === 'dir'" type="text" size="mini" @click="watchPrepareFromTree(data.path)">监听</el-button>
+                                                <el-button v-if="data.type === 'key'" type="text" size="mini" @click="kvEditorOpen('edit', data.key)">编辑</el-button>
+                                                <el-button v-if="data.type === 'key'" type="text" size="mini" class="danger-text" @click="confirmDeleteKey(data.key)">删除</el-button>
+                                            </span>
+                                        </span>
+                                    </el-tree>
+                                </div>
+                            </el-card>
+                        </el-col>
+                        <el-col :span="16" class="full-height-col">
+                            <el-card shadow="never" class="module-card full-card">
+                                <div slot="header" class="card-header">
+                                    <div>
+                                        <div class="card-title">Key 详情</div>
+                                        <div class="card-desc">查看 Value、Revision、Lease 与原始响应</div>
+                                    </div>
+                                    <el-button-group>
+                                        <el-tooltip :disabled="!actionDisabledReason('browser.create')" :content="actionDisabledReason('browser.create')" placement="top">
+                                            <span class="tooltip-button-wrap"><el-button size="mini" type="primary" icon="el-icon-plus" :disabled="!!actionDisabledReason('browser.create')" @click="kvEditorOpen('create', browserPrefix)">新增</el-button></span>
+                                        </el-tooltip>
+                                        <el-tooltip :disabled="!actionDisabledReason('browser.edit')" :content="actionDisabledReason('browser.edit')" placement="top">
+                                            <span class="tooltip-button-wrap"><el-button size="mini" icon="el-icon-edit" :disabled="!!actionDisabledReason('browser.edit')" @click="kvEditorOpen('edit', selectedKv && selectedKv.key)">编辑</el-button></span>
+                                        </el-tooltip>
+                                        <el-tooltip :disabled="!actionDisabledReason('browser.delete')" :content="actionDisabledReason('browser.delete')" placement="top">
+                                            <span class="tooltip-button-wrap"><el-button size="mini" type="danger" icon="el-icon-delete" :disabled="!!actionDisabledReason('browser.delete')" @click="confirmDeleteKey(selectedKv && selectedKv.key)">删除</el-button></span>
+                                        </el-tooltip>
+                                    </el-button-group>
+                                </div>
+                                <el-empty v-if="!selectedKv" description="请从左侧目录中选择一个 Key" :image-size="96"></el-empty>
+                                <div v-else>
+                                    <el-alert type="info" :closable="false" class="key-alert">
+                                        <span slot="title" class="mono break-word">{{ selectedKv.key }}</span>
+                                    </el-alert>
+                                    <el-descriptions :column="4" size="small" border class="meta-desc">
+                                        <el-descriptions-item label="createRevision">{{ safeValue(selectedKv.createRevision) }}</el-descriptions-item>
+                                        <el-descriptions-item label="modRevision">{{ safeValue(selectedKv.modRevision) }}</el-descriptions-item>
+                                        <el-descriptions-item label="version">{{ safeValue(selectedKv.version) }}</el-descriptions-item>
+                                        <el-descriptions-item label="leaseId">{{ safeValue(selectedKv.leaseId) }}</el-descriptions-item>
+                                    </el-descriptions>
+                                    <el-tabs v-model="valueViewMode" class="detail-tabs">
+                                        <el-tab-pane label="Text" name="text">
+                                            <pre class="code-box">{{ formattedSelectedValue }}</pre>
+                                        </el-tab-pane>
+                                        <el-tab-pane label="JSON" name="json">
+                                            <pre class="code-box">{{ formattedSelectedValue }}</pre>
+                                        </el-tab-pane>
+                                        <el-tab-pane label="Raw JSON" name="raw">
+                                            <pre class="code-box">{{ prettyResult }}</pre>
+                                        </el-tab-pane>
+                                    </el-tabs>
+                                </div>
+                            </el-card>
+                        </el-col>
+                    </el-row>
+                </section>
+
+                <section v-show="activeView === 'operations'">
+                    <el-card shadow="never" class="module-card">
+                        <div slot="header" class="card-header">
+                            <div>
+                                <div class="card-title">操作中心</div>
+                                <div class="card-desc">KV、Watch、Lease、Compact 统一收纳</div>
+                            </div>
+                            <el-tag>当前连接：{{ currentEndpointLabel || '未选择' }}</el-tag>
+                        </div>
+                        <el-alert
+                                v-if="!hasCurrentConnection"
+                                type="info"
+                                :closable="false"
+                                class="bottom-space"
+                                :title="operationBlockedReason()">
+                        </el-alert>
+                        <el-tabs v-model="activeOperationTab" type="border-card">
+                            <el-tab-pane label="KV 操作" name="kv">
+                                <el-row :gutter="16">
+                                    <el-col :span="10">
+                                        <el-form label-position="top" size="small">
+                                            <el-form-item label="Key / Prefix（必填）">
+                                                <el-input v-model.trim="kvForm.key" placeholder="Key 示例：/config/app/name；Prefix 示例：/config/ 或 1" clearable autocomplete="off"></el-input>
+                                            </el-form-item>
+                                            <el-form-item label="Value">
+                                                <el-input type="textarea" :rows="8" v-model="kvForm.value" placeholder="请输入 value" autocomplete="off"></el-input>
+                                            </el-form-item>
+                                            <el-form-item label="LeaseId（可选）">
+                                                <el-input v-model.number="kvForm.leaseId" placeholder="例如 1001" clearable autocomplete="off"></el-input>
+                                            </el-form-item>
+                                            <el-tooltip :disabled="!actionDisabledReason('kv.put')" :content="actionDisabledReason('kv.put')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('kv.put')" @click="putKv">Put</el-button></span>
+                                            </el-tooltip>
+                                            <el-tooltip :disabled="!actionDisabledReason('kv.get')" :content="actionDisabledReason('kv.get')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button :disabled="!!actionDisabledReason('kv.get')" @click="getKv">Get</el-button></span>
+                                            </el-tooltip>
+                                            <el-tooltip :disabled="!actionDisabledReason('kv.rangePrefix')" :content="actionDisabledReason('kv.rangePrefix')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button :disabled="!!actionDisabledReason('kv.rangePrefix')" @click="rangePrefix">Prefix 查询</el-button></span>
+                                            </el-tooltip>
+                                            <el-tooltip :disabled="!actionDisabledReason('kv.delete')" :content="actionDisabledReason('kv.delete')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button type="danger" plain :disabled="!!actionDisabledReason('kv.delete')" @click="confirmDeleteKey(kvForm.key)">Delete</el-button></span>
+                                            </el-tooltip>
+                                            <el-tooltip :disabled="!actionDisabledReason('kv.deletePrefix')" :content="actionDisabledReason('kv.deletePrefix')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button type="danger" :disabled="!!actionDisabledReason('kv.deletePrefix')" @click="confirmDeletePrefix(kvForm.key)">Delete Prefix</el-button></span>
+                                            </el-tooltip>
+                                        </el-form>
+                                    </el-col>
+                                    <el-col :span="14">
+                                        <result-panel :summary="resultSummary" :raw="prettyResult"></result-panel>
+                                    </el-col>
+                                </el-row>
+                            </el-tab-pane>
+                            <el-tab-pane label="Watch 监听" name="watch">
+                                <el-row :gutter="16">
+                                    <el-col :span="9">
+                                        <el-form label-position="top" size="small">
+                                            <el-form-item label="Key / Prefix（必填）">
+                                                <el-input v-model.trim="watchForm.key" placeholder="例如 /config/ 或 1" clearable autocomplete="off"></el-input>
+                                            </el-form-item>
+                                            <el-form-item>
+                                                <el-switch v-model="watchForm.prefix" active-text="Prefix 模式"></el-switch>
+                                            </el-form-item>
+                                            <el-tooltip :disabled="!actionDisabledReason('watch.start')" :content="actionDisabledReason('watch.start')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('watch.start')" @click="watchStart">开始监听</el-button></span>
+                                            </el-tooltip>
+                                        </el-form>
+                                        <el-divider content-position="left">活跃监听</el-divider>
+                                        <el-table :data="watchSessions" size="mini" border empty-text="暂无监听会话">
+                                            <el-table-column label="连接" width="150">
+                                                <template slot-scope="scope">{{ watchSessionEndpoint(scope.row) }}</template>
+                                            </el-table-column>
+                                            <el-table-column prop="key" label="Key"></el-table-column>
+                                            <el-table-column label="操作" width="80">
+                                                <template slot-scope="scope">
+                                                    <el-button type="text" size="mini" @click="watchCancelById(scope.row.watchId)">取消</el-button>
+                                                </template>
+                                            </el-table-column>
+                                        </el-table>
+                                    </el-col>
+                                    <el-col :span="15">
+                                        <div class="watch-event-toolbar">
+                                            <el-switch v-model="watchEventOnlyCurrentConnection" active-text="仅看当前连接" inactive-text="全部连接"></el-switch>
+                                            <el-button size="mini" @click="webSocketClearWatchEvents">清空事件</el-button>
+                                        </div>
+                                        <pre class="event-box">{{ watchEventsText }}</pre>
+                                    </el-col>
+                                </el-row>
+                            </el-tab-pane>
+                            <el-tab-pane label="Lease 管理" name="lease">
+                                <el-row :gutter="16">
+                                    <el-col :span="10">
+                                        <el-form label-position="top" size="small">
+                                            <el-form-item label="LeaseId">
+                                                <el-input v-model.number="leaseForm.leaseId"></el-input>
+                                            </el-form-item>
+                                            <el-form-item label="TTL 秒">
+                                                <el-input v-model.number="leaseForm.ttlSeconds"></el-input>
+                                            </el-form-item>
+                                            <el-tooltip :disabled="!actionDisabledReason('lease.grant')" :content="actionDisabledReason('lease.grant')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('lease.grant')" @click="grantLease">Grant</el-button></span>
+                                            </el-tooltip>
+                                            <el-tooltip :disabled="!actionDisabledReason('lease.ttl')" :content="actionDisabledReason('lease.ttl')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button :disabled="!!actionDisabledReason('lease.ttl')" @click="ttlLease">TTL</el-button></span>
+                                            </el-tooltip>
+                                            <el-tooltip :disabled="!actionDisabledReason('lease.list')" :content="actionDisabledReason('lease.list')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button :disabled="!!actionDisabledReason('lease.list')" @click="listLease">List</el-button></span>
+                                            </el-tooltip>
+                                            <el-tooltip :disabled="!actionDisabledReason('lease.revoke')" :content="actionDisabledReason('lease.revoke')" placement="top">
+                                                <span class="tooltip-button-wrap"><el-button type="danger" :disabled="!!actionDisabledReason('lease.revoke')" @click="confirmRevokeLease">Revoke</el-button></span>
+                                            </el-tooltip>
+                                        </el-form>
+                                    </el-col>
+                                    <el-col :span="14">
+                                        <result-panel :summary="resultSummary" :raw="prettyResult"></result-panel>
+                                    </el-col>
+                                </el-row>
+                            </el-tab-pane>
+                            <el-tab-pane label="Compact / 一致性" name="compact">
+                                <el-alert type="warning" :closable="false" title="Compact 会压缩指定 revision 之前的历史版本，可能影响历史查询和 Watch 行为。"></el-alert>
+                                <el-form inline size="small" class="top-space">
+                                    <el-form-item label="Prefix（必填）">
+                                        <el-input v-model.trim="comparePrefixValue" placeholder="用于多节点 Prefix 对比，例如 /config/ 或 1" clearable autocomplete="off"></el-input>
+                                    </el-form-item>
+                                    <el-tooltip :disabled="!actionDisabledReason('compact.comparePrefix')" :content="actionDisabledReason('compact.comparePrefix')" placement="top">
+                                        <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('compact.comparePrefix')" @click="comparePrefix">多节点 Prefix 对比</el-button></span>
+                                    </el-tooltip>
+                                </el-form>
+                                <el-form inline size="small">
+                                    <el-form-item label="Revision">
+                                        <el-input v-model.number="compactRevision" placeholder="大于 0"></el-input>
+                                    </el-form-item>
+                                    <el-tooltip :disabled="!actionDisabledReason('compact.execute')" :content="actionDisabledReason('compact.execute')" placement="top">
+                                        <span class="tooltip-button-wrap"><el-button type="danger" :disabled="!!actionDisabledReason('compact.execute')" @click="confirmCompact">Compact</el-button></span>
+                                    </el-tooltip>
+                                </el-form>
+                                <result-panel :summary="resultSummary" :raw="prettyResult"></result-panel>
+                            </el-tab-pane>
+                        </el-tabs>
+                    </el-card>
+                </section>
+
+                <section v-show="activeView === 'nodes'">
+                    <el-card shadow="never" class="module-card">
+                        <div slot="header" class="card-header">
+                            <div>
+                                <div class="card-title">节点状态</div>
+                                <div class="card-desc">Leader、Follower、Term、Index 与 Hash</div>
+                            </div>
+                            <el-button size="small" :disabled="!connections.length" @click="clusterLoadNodeStatus">刷新</el-button>
+                        </div>
+                        <el-row :gutter="12" class="summary-row">
+                            <el-col :span="6">
+                                <el-card shadow="never">
+                                    <div class="metric-label">健康状态</div>
+                                    <div class="metric-value">{{ clusterHealthLabel }}</div>
+                                </el-card>
+                            </el-col>
+                            <el-col :span="6">
+                                <el-card shadow="never">
+                                    <div class="metric-label">Leader</div>
+                                    <div class="metric-value">{{ leaderDisplay || '-' }}</div>
+                                </el-card>
+                            </el-col>
+                            <el-col :span="6">
+                                <el-card shadow="never">
+                                    <div class="metric-label">节点数</div>
+                                    <div class="metric-value">{{ connections.length }}</div>
+                                </el-card>
+                            </el-col>
+                            <el-col :span="6">
+                                <el-card shadow="never">
+                                    <div class="metric-label">在线节点</div>
+                                    <div class="metric-value">{{ onlineNodeCount }}</div>
+                                </el-card>
+                            </el-col>
+                        </el-row>
+                        <el-table :data="connections" border size="small" empty-text="暂无连接" class="top-space">
+                            <el-table-column label="Endpoint">
+                                <template slot-scope="scope">{{ connectionEndpoint(scope.row) }}</template>
+                            </el-table-column>
+                            <el-table-column label="Role">
+                                <template slot-scope="scope">
+                                    <el-tag :type="roleTagType(scope.row.nodeId)">{{ nodeRole(scope.row.nodeId) }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="状态">
+                                <template slot-scope="scope">
+                                    <el-tag :type="nodeStatusMap[scope.row.nodeId] ? 'success' : 'info'">{{ nodeStatusMap[scope.row.nodeId] ? '在线' : '未知' }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="term">
+                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'term') }}</template>
+                            </el-table-column>
+                            <el-table-column label="commitIndex">
+                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'commitIndex') }}</template>
+                            </el-table-column>
+                            <el-table-column label="revision">
+                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'revision') }}</template>
+                            </el-table-column>
+                            <el-table-column label="keyCount">
+                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'keyCount') }}</template>
+                            </el-table-column>
+                            <el-table-column label="hash">
+                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'hash') }}</template>
+                            </el-table-column>
+                        </el-table>
+                    </el-card>
+                </section>
+
+                <section v-show="activeView === 'connections'">
+                    <el-row :gutter="16">
+                        <el-col :span="9">
+                            <el-card shadow="never" class="module-card">
+                                <div slot="header" class="card-title">连接配置</div>
+                                <el-alert type="info" :closable="false" title="连接以 Endpoint 作为唯一识别，不允许重复连接同一个 host:port。" class="bottom-space"></el-alert>
+                                <el-form label-position="top" size="small">
+                                    <el-form-item label="Endpoint Host">
+                                        <el-input v-model.trim="connectForm.host" placeholder="例如 127.0.0.1" clearable autocomplete="off"></el-input>
+                                    </el-form-item>
+                                    <el-form-item label="Endpoint Port">
+                                        <el-input v-model.number="connectForm.port" placeholder="例如 2379" clearable autocomplete="off"></el-input>
+                                    </el-form-item>
+                                    <el-alert v-if="normalizedConnectEndpoint" type="success" :closable="false" :title="'将连接：' + normalizedConnectEndpoint" class="bottom-space"></el-alert>
+                                    <el-button type="primary" :disabled="!canConnect" @click="connectionConnectNode">连接</el-button>
+                                    <el-button @click="fillLocalCluster">填入本地节点</el-button>
+                                </el-form>
+                            </el-card>
+                        </el-col>
+                        <el-col :span="15">
+                            <el-card shadow="never" class="module-card">
+                                <div slot="header" class="card-title">已连接 Endpoint</div>
+                                <el-table :data="connections" border size="small" empty-text="暂无连接">
+                                    <el-table-column label="Endpoint">
+                                        <template slot-scope="scope">{{ connectionEndpoint(scope.row) }}</template>
+                                    </el-table-column>
+                                    <el-table-column label="状态">
+                                        <template slot-scope="scope">
+                                            <el-tag :type="nodeStatusMap[scope.row.nodeId] ? 'success' : 'info'">{{ nodeStatusMap[scope.row.nodeId] ? '已连接' : '待探测' }}</el-tag>
+                                        </template>
+                                    </el-table-column>
+                                    <el-table-column label="操作" width="180">
+                                        <template slot-scope="scope">
+                                            <el-button type="text" size="mini" @click="connectionUseNode(scope.row.nodeId)">使用</el-button>
+                                            <el-button type="text" size="mini" class="danger-text" @click="connectionConfirmDisconnect(scope.row.nodeId)">断开</el-button>
+                                        </template>
+                                    </el-table-column>
+                                </el-table>
+                            </el-card>
+                        </el-col>
+                    </el-row>
+                </section>
+
+                <section v-show="activeView === 'logs'">
+                    <el-card shadow="never" class="module-card">
+                        <div slot="header" class="card-header">
+                            <div>
+                                <div class="card-title">操作日志</div>
+                                <div class="card-desc">记录控制台关键操作，便于回溯与复制排查</div>
+                            </div>
+                            <div>
+                                <el-button size="small" @click="uiCopyLogs">复制日志</el-button>
+                                <el-button size="small" type="danger" plain @click="operationLogs = []">清空</el-button>
+                            </div>
+                        </div>
+                        <el-table :data="operationLogs" border size="small" empty-text="暂无操作日志">
+                            <el-table-column prop="time" label="时间" width="170"></el-table-column>
+                            <el-table-column prop="type" label="操作" width="120"></el-table-column>
+                            <el-table-column prop="target" label="目标" show-overflow-tooltip></el-table-column>
+                            <el-table-column label="连接" width="150">
+                                <template slot-scope="scope">{{ displayLogEndpoint(scope.row) }}</template>
+                            </el-table-column>
+                            <el-table-column prop="status" label="结果" width="90"></el-table-column>
+                            <el-table-column label="耗时" width="90">
+                                <template slot-scope="scope">{{ scope.row.cost }}ms</template>
+                            </el-table-column>
+                        </el-table>
+                    </el-card>
+                </section>
+            </el-main>
+        </el-container>
+    </el-container>
+
+    <el-dialog :title="modal.title" :visible.sync="modal.visible" width="460px">
+        <el-alert type="warning" :closable="false" :title="modal.message"></el-alert>
+        <el-form label-position="top" size="small" class="top-space">
+            <el-form-item :label="'请输入确认内容：' + modal.confirmText">
+                <el-input v-model="modal.input" autocomplete="off"></el-input>
+            </el-form-item>
+        </el-form>
+        <span slot="footer">
+            <el-button @click="closeModal">取消</el-button>
+            <el-button type="danger" :disabled="modal.input !== modal.confirmText" @click="modal.onConfirm">确认执行</el-button>
+        </span>
+    </el-dialog>
+
+    <el-dialog :title="kvEditor.mode === 'create' ? '新增 Key' : '编辑 Key'" :visible.sync="kvEditor.visible" width="640px">
+        <el-form label-position="top" size="small">
+            <el-form-item label="Key（必填）">
+                <el-input v-model.trim="kvEditor.key" clearable autocomplete="off"></el-input>
+            </el-form-item>
+            <el-form-item label="Value">
+                <el-input type="textarea" :rows="10" v-model="kvEditor.value" autocomplete="off"></el-input>
+            </el-form-item>
+            <el-form-item label="LeaseId（可选）">
+                <el-input v-model.number="kvEditor.leaseId" clearable autocomplete="off"></el-input>
+            </el-form-item>
+        </el-form>
+        <span slot="footer"><el-button @click="kvEditor.visible = false">取消</el-button><el-button type="primary" @click="kvEditorSubmit">保存</el-button></span>
+    </el-dialog>
+</div>
+
+<script type="text/x-template" id="result-panel-template">
+    <div class="result-panel">
+        <el-descriptions v-if="summary" :column="2" size="small" border>
+            <el-descriptions-item label="状态">
+                <el-tag :type="summary.success ? 'success' : 'danger'">{{ summary.success ? '成功' : '失败' }}</el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="操作">{{ summary.type }}</el-descriptions-item>
+            <el-descriptions-item label="目标"><span class="break-word">{{ summary.target || '-' }}</span></el-descriptions-item>
+            <el-descriptions-item label="提示">{{ summary.message || '-' }}</el-descriptions-item>
+        </el-descriptions>
+        <el-empty v-else description="暂无结果" :image-size="72"></el-empty>
+        <el-collapse class="top-space">
+            <el-collapse-item title="查看原始响应 JSON" name="raw">
+                <pre class="code-box small-code">{{ raw }}</pre>
+            </el-collapse-item>
+        </el-collapse>
+    </div>
+</script>
+
+<script src="/lib/vue/vue.min.js"></script>
+<script src="/lib/axios/axios.min.js"></script>
+<script src="/lib/element-ui/index.min.js"></script>
+<script src="/js/console-utils.js"></script>
+<script src="/js/api-client.js"></script>
+<script src="/js/request-builder.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
+

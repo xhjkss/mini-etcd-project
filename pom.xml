@@ -14,6 +14,7 @@
         <module>etcd-rpc</module>
         <module>etcd-kernel</module>
         <module>etcd-sdk</module>
+        <module>etcd-console</module>
     </modules>
 
     <properties>
