@@ -20,7 +20,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * WatchService
@@ -52,17 +51,12 @@ public class WatchService {
     private final ConcurrentMap<String, ConcurrentMap<Long, WatchHandle>> watchHandleMapByNodeId = new ConcurrentHashMap<>();
 
     /**
-     * 控制台本地 watchId 序列（仅在请求未指定 watchId 时分配）。
-     */
-    private final AtomicLong watchIdSequence = new AtomicLong(System.currentTimeMillis() * 1000L);
-
-    /**
      * 创建并启动 watch 会话。
      *
      * <p>流程：</p>
      * <ol>
      *     <li>校验入参与 host/port 对应 endpoint。</li>
-     *     <li>补齐 watchId/maxEvents 默认值。</li>
+     *     <li>补齐 maxEvents 默认值。</li>
      *     <li>创建 WatchListener 并发起 etcdClient.watch(...)。</li>
      *     <li>订阅成功后由 onSubscribed 回调完成 map 注册与 WATCH_CREATED 推送。</li>
      * </ol>
@@ -79,10 +73,7 @@ public class WatchService {
         NodeEndpoint nodeEndpoint = connectionService.requireConnectedEndpoint(host, port);
         String nodeId = nodeEndpoint.getNodeId();
 
-        // ==================== 2) 会话标识与默认参数准备 ====================
-        if (subscribeRequest.getWatchId() <= 0L) {
-            subscribeRequest.setWatchId(nextWatchId());
-        }
+        // ==================== 2) 默认参数准备 ====================
         if (subscribeRequest.getMaxEvents() <= 0) {
             subscribeRequest.setMaxEvents(128);
         }
@@ -97,9 +88,22 @@ public class WatchService {
                  *  监听器与 watchHandle 是一对一绑定关系（见 sdk WatchListener 约束），
                  *  所以 onSubscribed 回调时可直接拿到当前订阅句柄并注册到 nodeId 分桶。
                  *  这里统一作为“会话创建完成”的时刻，推送 WATCH_CREATED。
+                 *
+                 * TODO:
+                 *  当前策略只在 onSubscribed 执行 registerWatchHandle(...)，不在主线程提前注册。
+                 *  这样会话生命周期与回调时序保持一致：回调未到 -> 会话未创建；回调到达 -> 会话创建可见。
+                 *  该策略接受一个已知窗口：watch() 返回到 onSubscribed 到达前，立即 cancel(watchId) 可能查不到句柄。
                  */
                 WatchHandle watchHandle = getWatchHandle();
                 if (watchHandle == null) {
+                    return;
+                }
+                if (watchHandle.isClosed()) {
+                    /**
+                     * TODO:
+                     *  关闭收敛优先：若句柄已进入 closed（例如用户在创建后立即 cancel），
+                     *  onSubscribed 即使晚到也不再注册/广播 WATCH_CREATED，避免前端看到“已取消后又创建”的逆序展示。
+                     */
                     return;
                 }
                 registerWatchHandle(nodeId, watchHandle);
@@ -160,7 +164,11 @@ public class WatchService {
         /**
          * TODO:
          *  etcdClient.watch(...) 在 SDK 内部会把当前 watchHandle 绑定到 watchListener，
-         *  因此本方法返回后即可得到可用句柄；实际 map 注册由 onSubscribed 回调完成。
+         *  且 subscribeAckFuture 会先完成，再触发 onSubscribed 回调。
+         *
+         * TODO:
+         *  本服务约定“回调驱动创建可见性”：
+         *  startWatchOnEndpoint 只返回句柄视图，不在本地 map 预注册，最终注册由 onSubscribed 回调完成。
          */
         WatchHandle watchHandle = etcdClient.watch(subscribeRequest, nodeEndpoint, watchListener);
         return buildWatchSessionResponse(watchHandle);
@@ -203,8 +211,7 @@ public class WatchService {
             return;
         }
 
-        // cancel + close：cancel 负责协议层取消，close 负责本地句柄收敛。
-        watchHandle.cancel();
+        // close 统一执行“先尝试 cancel，再本地收敛”。
         watchHandle.close();
         String nodeId = watchHandle.getEndpoint() == null ? null : watchHandle.getEndpoint().getNodeId();
         consoleWebSocketGateway.broadcastEvent(
@@ -293,14 +300,6 @@ public class WatchService {
                 WebSocketMessageType.WATCH_EVENT,
                 nodeId,
                 buildWatchNotificationPayload(watchSessionResponse, watchNotification));
-    }
-
-    /**
-     * 分配下一个 watchId。
-     */
-    private long nextWatchId() {
-        long nextWatchId = watchIdSequence.incrementAndGet();
-        return nextWatchId <= 0L ? Math.abs(nextWatchId) + 1L : nextWatchId;
     }
 
     /**

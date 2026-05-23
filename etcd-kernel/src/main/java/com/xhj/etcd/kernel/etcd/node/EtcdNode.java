@@ -1991,10 +1991,10 @@ public class EtcdNode {
         // 也就是说：不回放任何历史，只把 watch 的起点放到 currentRevision 后面。
         long startRevision = request.getStartRevision() <= 0L ? currentRevision + 1L : request.getStartRevision();
 
+        // TODO: watchId 由服务端统一分配，不接受客户端指定；这样可避免跨节点/跨连接手工指定 ID 引发冲突与竞态。
         // 先登记会话，再回放历史。
         // 这么做的原因是：后续无论是历史回放还是实时推送，都要依赖同一个 watchId 和同一条会话记录。
         WatchSession session = watchStore.create(
-                request.getWatchId(),
                 request.getStartKey(),
                 request.getEndKeyExclusive(),
                 request.isPrefixMatch(),

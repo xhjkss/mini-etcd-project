@@ -194,7 +194,7 @@ public abstract class AbstractEtcdConsoleE2eTest {
      */
     protected void assertSuccess(JsonNode response) {
         assertNotNull(response);
-        assertEquals(0, response.get("code").asInt());
+        assertEquals(0, response.get("code").asInt(), "response=" + response.toString());
     }
 
     /**

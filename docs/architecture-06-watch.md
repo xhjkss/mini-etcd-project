@@ -9,6 +9,7 @@
 3. `startRevision` 历史回放与增量通知。
 4. `compactRevision` 边界下的取消语义。
 5. Watch 在 `etcdEventQueue + event-loop` 中的统一调度路径。
+6. `watchId` 由服务端分配，客户端在 subscribe 请求中不再携带 `watchId`。
 
 ## 2. 一眼看懂
 
@@ -57,7 +58,6 @@
 ```mermaid
 classDiagram
     class WatchSubscribeRequest {
-      +long watchId
       +String startKey
       +String endKeyExclusive
       +boolean prefixMatch
@@ -93,14 +93,14 @@ classDiagram
       +List_WatchEventView events
     }
 
-    class WatchSubscription {
+    class DefaultWatchHandle {
       +long watchId
       +String rpcMessageId
       +NodeEndpoint endpoint
       +WatchListener listener
     }
 
-    class WatchSubscriptionRegistry {
+    class WatchHandleRegistry {
       +register()
       +remove()
       +handle()
@@ -128,8 +128,8 @@ classDiagram
 
 说明：
 
-1. `WatchSubscription` 只负责客户端单个 watch 的生命周期、握手 ACK 和回调收尾。
-2. `WatchSubscriptionRegistry` 负责客户端分发，按 `watchId / rpcMessageId` 维护映射并处理入站消息。
+1. `DefaultWatchHandle` 只负责客户端单个 watch 的生命周期、握手 ACK 和回调收尾。
+2. `WatchHandleRegistry` 负责客户端分发，按 `watchId / rpcMessageId` 维护映射并处理入站消息。
 3. `RpcClient` 负责底层连接复用和消息投递，watch 只是它承载的一种业务。
 3. `WatchStore` 负责服务端会话元数据和 `channel + rpcMessageId` 绑定。
 4. `WatchNotification` 同时承载正常事件和 compact 取消事件。
@@ -152,6 +152,8 @@ sequenceDiagram
     E->>K: read replay events by revision window
     E-->>N: WatchSubscribeResponse
     N->>W: bindWatchChannel(watchId, channel, rpcMessageId)
+    N->>W: enqueueWatchResponse(...)
+    N->>W: enableNotificationPush(watchId)
     N-->>C: RESPONSE(WatchSubscribeResponse)
 
     Note over N,E: 任意写命令 apply 完成后
@@ -174,7 +176,7 @@ sequenceDiagram
     participant R as RpcClient
     participant CH as Channel
     participant N as EtcdNode
-    participant D as WatchSubscriptionRegistry
+    participant D as WatchHandleRegistry
 
     C->>R: call(put/get/txn...)
     R->>CH: REQUEST(rpcMessageId=A)
@@ -206,15 +208,16 @@ sequenceDiagram
 
 1. 客户端发送 `watch-subscribe` 控制请求并按自身路由策略选择目标节点。
 2. 优先尝试当前路由节点，若返回 `notLeader + leaderId`，则切换到 leader 重试。
-3. 为该 watch 生成独立 `watchId` 和 `rpcMessageId`。
-4. 先注册到 `WatchSubscriptionRegistry`，再发送 `subscribe` 请求，避免响应先到导致找不到订阅上下文。
+3. 为该 watch 生成独立 `rpcMessageId`，`watchId` 在服务端 subscribe ACK 成功后返回。
+4. 先注册到 `WatchHandleRegistry`，再发送 `subscribe` 请求，避免响应先到导致找不到订阅上下文。
 5. 阻塞等待首帧 `WatchSubscribeResponse`：
    - 成功：返回 `WatchHandle`。
    - 失败：清理上下文并抛错。
+6. 在首帧响应返回前，`WatchHandle.getWatchId()` 为 `0`；首帧成功后才变为服务端分配的正数 `watchId`。
 
-`WatchSubscriptionRegistry` 在这里的作用很直接：
+`WatchHandleRegistry` 在这里的作用很直接：
 
-1. 先把 `rpcMessageId -> WatchSubscription` 建好。
+1. 先把 `rpcMessageId -> DefaultWatchHandle` 建好。
 2. 等 RPC 层把响应或推送消息收到后，再按 `rpcMessageId` 找到对应的订阅对象。
 3. 订阅对象再去决定这是握手响应、取消响应还是普通事件。
 
@@ -226,34 +229,45 @@ sequenceDiagram
 
 ### 5.2 取消
 
-`WatchHandle.cancel()`：
+`WatchHandle.close()`：
 
-1. 用同一个 `rpcMessageId` 发送 `watch-cancel`。
+1. SDK 内部会在合适阶段用同一个 `rpcMessageId` 发送 `watch-cancel`。
 2. 收到 `WatchCancelResponse` 后清理本地订阅和 handler 注册。
 3. 取消是本地会话收口，不关闭整个 TCP/Channel。
+4. 若在 `SUBSCRIBING` 阶段调用 `close()`，SDK 会先记录“ACK 后立刻 cancel”的意图，等拿到服务端 `watchId` 后再发 cancel，避免服务端残留会话。
 
 ### 5.3 推送分发
 
-`WatchSubscriptionRegistry` 对同一连接上的多个 watch 做统一分发：
+`WatchHandleRegistry` 对同一连接上的多个 watch 做统一分发：
 
 1. `RESPONSE`：处理 subscribe/cancel。
 2. `STREAM`：反序列化 `WatchNotification`，按 `rpcMessageId` 找到目标订阅。
 3. `ERROR / 连接关闭`：回调错误并清理订阅。
 4. 如果监听器处理消息时抛异常，客户端直接关闭该 watch，不做自动重连。
+5. 若收到 `watchId` 与本地句柄不匹配的响应/推送，SDK 会主动补发 `watch-cancel` 回收未知会话。
 
-### 5.4 `WatchSubscriptionRegistry` 和 `WatchSubscription` 的分工
+### 5.5 控制台层会话可见性（当前实现）
+
+`etcd-console` 当前采用“回调驱动注册”策略：
+
+1. `startWatchOnEndpoint(...)` 返回后，不在主线程提前注册本地会话映射。
+2. 仅在 `onSubscribed(...)` 回调中执行 `registerWatchHandle(...)`，再广播 `WATCH_CREATED`。
+3. 该策略语义更直观：回调未到前，会话不对外可见；回调到达后，才视为会话创建完成。
+4. 该策略接受一个窗口：`watch()` 返回到 `onSubscribed` 到达前，立即执行 `cancel(watchId)` 可能查不到句柄。
+
+### 5.4 `WatchHandleRegistry` 和 `DefaultWatchHandle` 的分工
 
 这两个类不要混着看：
 
-1. `WatchSubscriptionRegistry` 只做“找人”和“清理人”。
-2. `WatchSubscription` 只做“这个 watch 自己该怎么处理消息”。
+1. `WatchHandleRegistry` 只做“找人”和“清理人”。
+2. `DefaultWatchHandle` 只做“这个 watch 自己该怎么处理消息”。
 
 更具体一点：
 
 1. `Registry` 看到入站消息后，先按 `rpcMessageId` 找到对应订阅。
-2. 找到后把消息交给 `WatchSubscription.handleMessage(...)`。
-3. `WatchSubscription` 再根据消息类型决定是订阅 ACK、取消 ACK 还是事件推送。
-4. 如果 `WatchSubscription` 终止了，`Registry` 会把这条 `rpcMessageId` 对应的注册关系清掉。
+2. 找到后把消息交给 `DefaultWatchHandle.handleMessage(...)`。
+3. `DefaultWatchHandle` 再根据消息类型决定是订阅 ACK、取消 ACK 还是事件推送。
+4. 如果 `DefaultWatchHandle` 终止了，`Registry` 会把这条 `rpcMessageId` 对应的注册关系清掉。
 
 ## 6. 服务端流程
 
@@ -263,7 +277,7 @@ sequenceDiagram
 
 1. 如果 `request.leaderOnly=true` 且当前节点不是 Leader，直接返回 `notLeader + leaderId`。
 2. 否则把 `WATCH_SUBSCRIBE` 投递到 event-loop。
-3. `applyWatchSubscribeRequest` 校验参数、计算回放窗口、创建会话、构建响应。
+3. `applyWatchSubscribeRequest` 校验参数、计算回放窗口、创建会话（服务端分配 watchId）、构建响应。
 4. 订阅成功后调用 `watchStore.bindWatchChannel(...)` 绑定会话路由。
 5. 首帧 `WatchSubscribeResponse` 先进入 `WatchChannelWriteRegistry` 写队列，随后再启用会话推送开关。
 
@@ -343,8 +357,8 @@ sequenceDiagram
 ## 11. 关键实现点
 
 1. `EtcdClient.watch(...)`
-2. `WatchSubscriptionRegistry.handle(...)`
-3. `WatchSubscription.handleMessage(...)`
+2. `WatchHandleRegistry.handle(...)`
+3. `DefaultWatchHandle.handleMessage(...)`
 4. `EtcdNode.handleEtcdRpcWatchSubscribeRequest(...)`
 5. `EtcdNode.publishWatchNotifications(...)`
 6. `WatchStore.create/bindWatchChannel/cancel/cancelByChannelId`

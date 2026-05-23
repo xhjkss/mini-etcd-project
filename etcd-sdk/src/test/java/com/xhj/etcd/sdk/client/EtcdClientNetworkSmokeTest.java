@@ -106,6 +106,7 @@ public class EtcdClientNetworkSmokeTest {
             });
 
             Assert.assertTrue("watch subscribe ack timeout", subscribedLatch.await(5L, TimeUnit.SECONDS));
+            Assert.assertTrue("watchId should be assigned by server after subscribe ACK", handle.getWatchId() > 0L);
 
             PutResponse putResponse = client.put(new PutRequest(watchKey, watchValue));
             Assert.assertNotNull("put response must not be null", putResponse);
@@ -121,7 +122,7 @@ public class EtcdClientNetworkSmokeTest {
             Assert.assertNotNull("watch event keyValue must not be null", eventViewRef.get().getKeyValue());
             Assert.assertEquals("watch event key mismatch", watchKey, eventViewRef.get().getKeyValue().getKey());
 
-            handle.cancel();
+            handle.close();
             Assert.assertTrue("watch cancel ack timeout", canceledLatch.await(5L, TimeUnit.SECONDS));
             Assert.assertTrue("watch handle should be closed", handle.isClosed());
             handle = null;
@@ -221,6 +222,7 @@ public class EtcdClientNetworkSmokeTest {
 
                 WatchHandle watchHandle = watchHandleRef.get();
                 if (watchHandle != null) {
+                    Assert.assertTrue("watchId should be assigned by server, round=" + round, watchHandle.getWatchId() > 0L);
                     watchHandle.close();
                 }
             }

@@ -46,13 +46,13 @@ public class EtcdConsoleFullChainRegressionTest extends AbstractEtcdConsoleE2eTe
         assertTrue(leaseGrantResponse.get("data").get("lease").get("leaseId").asLong() > 0L);
 
         JsonNode firstWatchResponse = postJson("/api/watch/start?" + endpointQueryByNodeId(leaderNodeId),
-                "{\"watchId\":0,\"startKey\":\"app/\",\"prefixMatch\":true,\"startRevision\":0,\"leaderOnly\":false}");
+                "{\"startKey\":\"app/\",\"prefixMatch\":true,\"startRevision\":0,\"leaderOnly\":false}");
         assertSuccess(firstWatchResponse);
         long firstWatchId = firstWatchResponse.get("data").get("watchId").asLong();
         assertTrue(firstWatchId > 0L);
 
         JsonNode secondWatchResponse = postJson("/api/watch/start?" + endpointQueryByNodeId(leaderNodeId),
-                "{\"watchId\":0,\"startKey\":\"app/b\",\"prefixMatch\":false,\"startRevision\":0,\"leaderOnly\":false}");
+                "{\"startKey\":\"app/b\",\"prefixMatch\":false,\"startRevision\":0,\"leaderOnly\":false}");
         assertSuccess(secondWatchResponse);
         long secondWatchId = secondWatchResponse.get("data").get("watchId").asLong();
         assertTrue(secondWatchId > 0L);

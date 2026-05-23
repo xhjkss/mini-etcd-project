@@ -262,10 +262,7 @@ public class WebSocketNodeKvWatchScheduler {
         if (watchHandle == null) {
             return;
         }
-        try {
-            watchHandle.cancel();
-        } catch (Exception ignored) {
-        }
+        // close 统一执行“先尝试 cancel，再本地收敛”。
         watchHandle.close();
     }
 

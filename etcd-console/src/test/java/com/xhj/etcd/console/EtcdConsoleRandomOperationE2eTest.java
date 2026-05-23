@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -114,6 +115,7 @@ public class EtcdConsoleRandomOperationE2eTest extends AbstractEtcdConsoleE2eTes
         nodeIds.add("n1");
         nodeIds.add("n2");
         nodeIds.add("n3");
+        String leaderNodeId = awaitLeaderNodeId();
 
         long maxRevision = 0L;
         for (int step = 1; step <= steps; step++) {
@@ -162,7 +164,7 @@ public class EtcdConsoleRandomOperationE2eTest extends AbstractEtcdConsoleE2eTes
                             jsonString(bodyMap("revision", 0))));
                     break;
                 case 13:
-                    runWatchCreateOrCancel(random, seed, step, nodeIds, watchIds);
+                    runWatchCreateOrCancel(random, seed, step, leaderNodeId, watchIds);
                     break;
                 default:
                     break;
@@ -312,20 +314,18 @@ public class EtcdConsoleRandomOperationE2eTest extends AbstractEtcdConsoleE2eTes
     private void runWatchCreateOrCancel(Random random,
                                         int seed,
                                         int step,
-                                        List<String> nodeIds,
+                                        String leaderNodeId,
                                         List<Long> watchIds) throws Exception {
         if (watchIds.isEmpty() || random.nextBoolean()) {
-            long watchId = ((long) seed) * 100000L + step;
-            String nodeIdForWatch = pickNodeId(random, nodeIds);
+            String nodeIdForWatch = leaderNodeId;
             JsonNode response = postJson("/api/watch/start?" + endpointQueryByNodeId(nodeIdForWatch),
-                    jsonString(bodyMap("watchId", watchId,
-                            "startKey", "rand/",
+                    jsonString(bodyMap("startKey", "rand/",
                             "endKeyExclusive", "",
                             "prefixMatch", true,
                             "startRevision", 0,
                             "maxEvents", 64,
                             "leaderOnly", false)));
-            assertSuccess(response);
+            assertWatchCreateSuccess(response, seed, step, nodeIdForWatch);
             watchIds.add(response.get("data").get("watchId").asLong());
             return;
         }
@@ -335,6 +335,23 @@ public class EtcdConsoleRandomOperationE2eTest extends AbstractEtcdConsoleE2eTes
         JsonNode response = deleteJson("/api/watch?watchId=" + watchId);
         assertSuccess(response);
         watchIds.remove(index);
+    }
+
+    /**
+     * watch 创建断言（附带随机上下文，便于复现失败）。
+     */
+    private void assertWatchCreateSuccess(JsonNode response, int seed, int step, String nodeIdForWatch) {
+        assertNotNull(response);
+        int code = response.get("code").asInt();
+        if (code == 0) {
+            return;
+        }
+        String message = response.get("message") == null ? "" : response.get("message").asText();
+        throw new AssertionError("watch create failed, seed=" + seed
+                + ", step=" + step
+                + ", nodeId=" + nodeIdForWatch
+                + ", response=" + response.toString()
+                + ", message=" + message);
     }
 
     /**

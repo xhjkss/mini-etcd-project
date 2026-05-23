@@ -196,11 +196,10 @@ public class EtcdNodeWatchSubscriptionTest {
     }
 
     @Test
-    public void shouldRejectDuplicateExplicitWatchIdSubscription() throws Exception {
+    public void shouldAssignDistinctServerWatchIdForDifferentSubscriptions() throws Exception {
         awaitLeader(node, 3000L);
 
         WatchSubscribeRequest firstSubscribeRequest = new WatchSubscribeRequest();
-        firstSubscribeRequest.setWatchId(777L);
         firstSubscribeRequest.setStartKey("watch/duplicate-id/");
         firstSubscribeRequest.setPrefixMatch(true);
         EtcdRpcResponse<WatchSubscribeResponse> firstSubscribeResponse = node.handleEtcdRpcWatchSubscribeRequest(
@@ -211,10 +210,9 @@ public class EtcdNodeWatchSubscriptionTest {
         assertNotNull(firstSubscribeResponse.getHeader());
         assertTrue(firstSubscribeResponse.getHeader().isSuccess());
         assertNotNull(firstSubscribeResponse.getBody());
-        assertEquals(777L, firstSubscribeResponse.getBody().getWatchId());
+        assertTrue(firstSubscribeResponse.getBody().getWatchId() > 0L);
 
         WatchSubscribeRequest secondSubscribeRequest = new WatchSubscribeRequest();
-        secondSubscribeRequest.setWatchId(777L);
         secondSubscribeRequest.setStartKey("watch/duplicate-id/");
         secondSubscribeRequest.setPrefixMatch(true);
         EtcdRpcResponse<WatchSubscribeResponse> secondSubscribeResponse = node.handleEtcdRpcWatchSubscribeRequest(
@@ -223,8 +221,10 @@ public class EtcdNodeWatchSubscriptionTest {
                 "watch-test-subscribe-duplicate-2");
         assertNotNull(secondSubscribeResponse);
         assertNotNull(secondSubscribeResponse.getHeader());
-        assertFalse(secondSubscribeResponse.getHeader().isSuccess());
-        assertTrue(secondSubscribeResponse.getHeader().getMessage().contains("duplicate active watchId"));
+        assertTrue(secondSubscribeResponse.getHeader().isSuccess());
+        assertNotNull(secondSubscribeResponse.getBody());
+        assertTrue(secondSubscribeResponse.getBody().getWatchId() > 0L);
+        assertTrue(secondSubscribeResponse.getBody().getWatchId() != firstSubscribeResponse.getBody().getWatchId());
     }
 
     @Test

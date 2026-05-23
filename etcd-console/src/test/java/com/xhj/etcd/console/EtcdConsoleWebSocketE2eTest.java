@@ -84,10 +84,10 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
                 new WebSocketHttpHeaders(),
                 URI.create("ws://127.0.0.1:" + serverPort + "/ws/console")).get(5, TimeUnit.SECONDS);
 
-        long watchId = 990001L;
         JsonNode createWatchResponse = postJson("/api/watch/start?" + endpointQueryByNodeId(leaderNodeId),
-                objectMapper.writeValueAsString(watchCreateBody(watchId, "ws/e2e/")));
+                objectMapper.writeValueAsString(watchCreateBody("ws/e2e/")));
         assertSuccess(createWatchResponse);
+        long watchId = createWatchResponse.get("data").get("watchId").asLong();
 
         JsonNode putResponse1 = postJson("/api/mvcc/put",
                 objectMapper.writeValueAsString(kvPutBody("ws/e2e/k1", "v1")));
@@ -140,8 +140,8 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
         connectAllNodes();
         String leaderNodeId = awaitLeaderNodeId();
 
-        long watchIdA = 990011L;
-        long watchIdB = 990012L;
+        long watchIdA;
+        long watchIdB;
 
         StandardWebSocketClient webSocketClient = new StandardWebSocketClient();
         WatchEventCollectorHandler handlerOne = new WatchEventCollectorHandler(objectMapper, 2);
@@ -155,11 +155,13 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
                 URI.create("ws://127.0.0.1:" + serverPort + "/ws/console")).get(5, TimeUnit.SECONDS);
 
         JsonNode createWatchAResponse = postJson("/api/watch/start?" + endpointQueryByNodeId(leaderNodeId),
-                objectMapper.writeValueAsString(watchCreateBody(watchIdA, "ws/multi/a/")));
+                objectMapper.writeValueAsString(watchCreateBody("ws/multi/a/")));
         assertSuccess(createWatchAResponse);
+        watchIdA = createWatchAResponse.get("data").get("watchId").asLong();
         JsonNode createWatchBResponse = postJson("/api/watch/start?" + endpointQueryByNodeId(leaderNodeId),
-                objectMapper.writeValueAsString(watchCreateBody(watchIdB, "ws/multi/b/")));
+                objectMapper.writeValueAsString(watchCreateBody("ws/multi/b/")));
         assertSuccess(createWatchBResponse);
+        watchIdB = createWatchBResponse.get("data").get("watchId").asLong();
 
         JsonNode putResponseA1 = postJson("/api/mvcc/put",
                 objectMapper.writeValueAsString(kvPutBody("ws/multi/a/k1", "v-a-1")));
@@ -223,11 +225,11 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
 
         List<Long> watchIdList = new ArrayList<>();
         for (int index = 0; index < watchCount; index++) {
-            long watchId = 990100L + index;
-            watchIdList.add(watchId);
             JsonNode createWatchResponse = postJson("/api/watch/start?" + endpointQueryByNodeId(leaderNodeId),
-                    objectMapper.writeValueAsString(watchCreateBody(watchId, "ws/churn/" + index + "/")));
+                    objectMapper.writeValueAsString(watchCreateBody("ws/churn/" + index + "/")));
             assertSuccess(createWatchResponse);
+            long watchId = createWatchResponse.get("data").get("watchId").asLong();
+            watchIdList.add(watchId);
         }
 
         for (int index = 0; index < watchCount; index++) {
@@ -319,15 +321,14 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
         List<String> knownKeyList = new ArrayList<>();
 
         Random random = new Random(randomSeed);
-        long nextWatchId = 991000L;
         for (int step = 0; step < steps; step++) {
             int operationType = random.nextInt(100);
             if (activePrefixByWatchId.isEmpty() || operationType < 35) {
                 String prefix = prefixList.get(random.nextInt(prefixList.size()));
-                long watchId = nextWatchId++;
                 JsonNode createWatchResponse = postJson("/api/watch/start?" + endpointQueryByNodeId(leaderNodeId),
-                        objectMapper.writeValueAsString(watchCreateBody(watchId, prefix)));
+                        objectMapper.writeValueAsString(watchCreateBody(prefix)));
                 assertSuccess(createWatchResponse);
+                long watchId = createWatchResponse.get("data").get("watchId").asLong();
                 activePrefixByWatchId.put(watchId, prefix);
                 continue;
             }
@@ -399,9 +400,8 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
     /**
      * 构造 watch 创建请求体。
      */
-    private Map<String, Object> watchCreateBody(long watchId, String startKey) {
+    private Map<String, Object> watchCreateBody(String startKey) {
         java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
-        body.put("watchId", watchId);
         body.put("startKey", startKey);
         body.put("endKeyExclusive", "");
         body.put("prefixMatch", true);

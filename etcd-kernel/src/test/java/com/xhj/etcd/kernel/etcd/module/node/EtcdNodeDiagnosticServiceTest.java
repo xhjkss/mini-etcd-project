@@ -140,7 +140,6 @@ public class EtcdNodeDiagnosticServiceTest {
         assertTrue(leaseGrantResponse.getHeader().isSuccess());
 
         WatchSubscribeRequest watchSubscribeRequest = new WatchSubscribeRequest();
-        watchSubscribeRequest.setWatchId(10001L);
         watchSubscribeRequest.setStartKey("diag/status/watch/");
         watchSubscribeRequest.setPrefixMatch(true);
         EtcdRpcResponse<WatchSubscribeResponse> watchSubscribeResponse = node.handleEtcdRpcWatchSubscribeRequest(

@@ -5,6 +5,7 @@ import com.xhj.etcd.rpc.RpcMessageType;
 import com.xhj.etcd.serializer.Serializer;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelId;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,7 +32,7 @@ public class WatchStore {
     /**
      * channelId -> watchId 集合。
      */
-    private final ConcurrentMap<String, Set<Long>> watchIdsByChannelId = new ConcurrentHashMap<>();
+    private final ConcurrentMap<ChannelId, Set<Long>> watchIdsByChannelId = new ConcurrentHashMap<>();
 
     /**
      * 下一次分配的 watchId。
@@ -52,12 +53,14 @@ public class WatchStore {
 
     /**
      * 创建 watch 订阅会话。
+     *
+     * <p>TODO:
+     * create 只做“会话登记”，不做 channel 绑定，也不立即允许推送。
+     * 这样可以把“会话创建”和“首帧 subscribe 响应已进入发送队列”两个时点拆开，
+     * 后续由 enableNotificationPush(...) 做明确门控，避免先推事件后回响应的时序竞态。
+     * </p>
      */
-    public WatchSession create(long requestedWatchId, String startKey, String endKeyExclusive, boolean prefixMatch, long nextRevision) {
-        if (requestedWatchId > 0L && sessionByWatchId.containsKey(requestedWatchId)) {
-            throw new IllegalStateException("duplicate active watchId, watchId=" + requestedWatchId);
-        }
-
+    public WatchSession create(String startKey, String endKeyExclusive, boolean prefixMatch, long nextRevision) {
         WatchSession session = new WatchSession();
         session.setStartKey(startKey);
         session.setEndKeyExclusive(endKeyExclusive);
@@ -65,18 +68,11 @@ public class WatchStore {
         session.setNextRevision(nextRevision);
         session.setNotificationPushEnabled(false);
 
-        while (true) {
-            long watchId = resolveWatchId(requestedWatchId);
-            session.setWatchId(watchId);
-            WatchSession previous = sessionByWatchId.putIfAbsent(watchId, copy(session));
-            if (previous == null) {
-                return copy(session);
-            }
-            if (requestedWatchId > 0L) {
-                throw new IllegalStateException("duplicate active watchId, watchId=" + requestedWatchId);
-            }
-            requestedWatchId = 0L;
-        }
+        // TODO: watchId 只由服务端分配，客户端 subscribe 请求不再携带 watchId，避免跨节点/跨连接手工指定 ID 引发冲突。
+        long watchId = resolveNextWatchId();
+        session.setWatchId(watchId);
+        sessionByWatchId.put(watchId, copy(session));
+        return copy(session);
     }
 
     /**
@@ -97,7 +93,7 @@ public class WatchStore {
         session.setChannel(channel);
         session.setRpcMessageId(rpcMessageId);
 
-        final String channelId = watchChannelId(channel);
+        final ChannelId channelId = channel.id();
         Set<Long> watchIds = watchIdsByChannelId.get(channelId);
         if (watchIds == null) {
             Set<Long> createdWatchIds = ConcurrentHashMap.newKeySet();
@@ -148,6 +144,8 @@ public class WatchStore {
      * @return true 表示成功入队
      */
     public boolean enqueueWatchResponse(Channel channel, String rpcMessageId, Object response) {
+        // TODO: 控制面（RESPONSE）与数据面（STREAM）统一进同一个 channel 写注册表，
+        //  由 channel.eventLoop 串行 drain，可稳定保证该 channel 的发送顺序。
         return watchChannelWriteRegistry.enqueue(channel, rpcMessageId, RpcMessageType.RESPONSE, response);
     }
 
@@ -160,6 +158,7 @@ public class WatchStore {
      * @return true 表示成功入队
      */
     public boolean enqueueWatchNotification(Channel channel, String rpcMessageId, WatchNotification notification) {
+        // TODO: 不直接 writeAndFlush，统一入队；与 subscribe 首帧响应共用发送通道，避免跨线程写导致顺序抖动。
         return watchChannelWriteRegistry.enqueue(channel, rpcMessageId, RpcMessageType.STREAM, notification);
     }
 
@@ -200,6 +199,8 @@ public class WatchStore {
 
     /**
      * 更新 watch 会话下一次事件读取起始 revision。
+     *
+     * <p>nextRevision 是每个 watch 会话独立游标，不影响全局 KV currentRevision。</p>
      */
     public void updateNextRevision(long watchId, long nextRevision) {
         WatchSession session = sessionByWatchId.get(watchId);
@@ -211,6 +212,12 @@ public class WatchStore {
 
     /**
      * 取消 watch 会话。
+     *
+     * <p>会话取消包含两部分：</p>
+     * <ol>
+     *     <li>从 watchId 主表移除。</li>
+     *     <li>从 channelId 反向索引移除，避免连接关闭时重复处理。</li>
+     * </ol>
      */
     public boolean cancel(long watchId) {
         WatchSession session = sessionByWatchId.remove(watchId);
@@ -218,23 +225,18 @@ public class WatchStore {
             return false;
         }
         if (session.getChannel() != null) {
-            String channelId = watchChannelId(session.getChannel());
-            Set<Long> watchIds = watchIdsByChannelId.get(channelId);
-            if (watchIds != null) {
-                watchIds.remove(watchId);
-                if (watchIds.isEmpty()) {
-                    watchIdsByChannelId.remove(channelId);
-                }
-            }
+            unbindWatchIdFromChannel(session.getChannel().id(), watchId);
         }
         return true;
     }
 
     /**
      * 取消指定 channel 绑定的全部 watch 会话。
+     *
+     * <p>连接级回收入口：当 TCP 断开时，一次性回收该连接挂载的所有 watch。</p>
      */
-    public void cancelByChannelId(String channelId) {
-        if (channelId == null || channelId.trim().isEmpty()) {
+    public void cancelByChannelId(ChannelId channelId) {
+        if (channelId == null) {
             return;
         }
         Set<Long> watchIds = watchIdsByChannelId.remove(channelId);
@@ -251,20 +253,28 @@ public class WatchStore {
     /**
      * 解析 watchId。
      */
-    private long resolveWatchId(long requestedWatchId) {
-        if (requestedWatchId > 0L) {
-            nextWatchId.updateAndGet(current -> Math.max(current, requestedWatchId));
-            return requestedWatchId;
-        }
+    private long resolveNextWatchId() {
         long nextId = nextWatchId.incrementAndGet();
         return nextId <= 0L ? Math.abs(nextId) + 1L : nextId;
     }
 
     /**
-     * 构造 channelId。
+     * 解绑 channel 下的单个 watchId。
+     *
+     * <p>TODO: 这里只用 ChannelId + Set<WatchId> 维护关系，保持结构精简清晰。</p>
      */
-    private String watchChannelId(Channel channel) {
-        return channel.id().asLongText();
+    private void unbindWatchIdFromChannel(ChannelId channelId, long watchId) {
+        if (channelId == null) {
+            return;
+        }
+        Set<Long> watchIds = watchIdsByChannelId.get(channelId);
+        if (watchIds == null) {
+            return;
+        }
+        watchIds.remove(watchId);
+        if (watchIds.isEmpty()) {
+            watchIdsByChannelId.remove(channelId);
+        }
     }
 
     /**

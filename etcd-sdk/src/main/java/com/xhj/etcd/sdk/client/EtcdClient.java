@@ -2,8 +2,8 @@ package com.xhj.etcd.sdk.client;
 
 import com.xhj.etcd.sdk.client.watch.WatchHandle;
 import com.xhj.etcd.sdk.client.watch.WatchListener;
-import com.xhj.etcd.sdk.client.watch.WatchSubscription;
-import com.xhj.etcd.sdk.client.watch.WatchSubscriptionRegistry;
+import com.xhj.etcd.sdk.client.watch.DefaultWatchHandle;
+import com.xhj.etcd.sdk.client.watch.WatchHandleRegistry;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRangeResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.DeleteRequest;
@@ -60,12 +60,12 @@ public class EtcdClient implements AutoCloseable {
     /**
      * Watch 创建握手超时时间，单位：毫秒。
      */
-    private static final long WATCH_SUBSCRIBE_ACK_TIMEOUT_MILLIS = 5000L;
+    private static final long WATCH_SUBSCRIBE_ACK_TIMEOUT_MILLIS = 15000L;
 
     /**
-     * 客户端本地 watchId 序列。
+     * 单节点 watch 握手最大重试次数。
      */
-    private static final AtomicLong WATCH_ID_SEQUENCE = new AtomicLong(System.currentTimeMillis() * 1000L);
+    private static final int WATCH_SUBSCRIBE_MAX_ATTEMPTS_PER_ENDPOINT = 3;
 
     /**
      * 客户端本地 watch 路由消息序列。
@@ -92,7 +92,7 @@ public class EtcdClient implements AutoCloseable {
     /**
      * Watch 订阅注册表。
      */
-    private final WatchSubscriptionRegistry watchSubscriptionRegistry = new WatchSubscriptionRegistry();
+    private final WatchHandleRegistry watchHandleRegistry = new WatchHandleRegistry();
 
     /**
      * 当前优先请求的节点地址。
@@ -296,13 +296,13 @@ public class EtcdClient implements AutoCloseable {
      *
      * <p>TODO: 流程分为 4 步：</p>
      * <ol>
-     *     <li>先准备本地订阅对象：watchId + rpcMessageId + endpoint + listener。</li>
+     *     <li>先准备本地 watchHandle：rpcMessageId + endpoint + listener。</li>
      *     <li>再发送 subscribe 一元请求，首帧 RESPONSE 作为订阅握手结果。</li>
-     *     <li>握手成功后，后续 STREAM 推送继续复用同一个 rpcMessageId 路由到该 watch 订阅对象。</li>
-     *     <li>cancel/失败/连接关闭时统一清理本地订阅对象与 rpcMessageId handler 注册，避免泄漏。</li>
+     *     <li>握手成功后，后续 STREAM 推送继续复用同一个 rpcMessageId 路由到该 watchHandle。</li>
+     *     <li>cancel/失败/连接关闭时统一清理本地 watchHandle 与 rpcMessageId handler 注册，避免泄漏。</li>
      * </ol>
      *
-     * <p>TODO: watchId 是业务会话标识；rpcMessageId 是 RPC 路由标识。一个 TCP 连接上可以同时存在多个 watch，靠不同 rpcMessageId 分流。</p>
+     * <p>TODO: watchId 由服务端分配并在 subscribe ACK 中返回；rpcMessageId 是 RPC 路由标识。一个 TCP 连接上可以同时存在多个 watch，靠不同 rpcMessageId 分流。</p>
      */
     public WatchHandle watch(WatchSubscribeRequest request, WatchListener listener) {
         // TODO: 默认 watch 方法尊重调用方 request 中的 leaderOnly 策略，不在 SDK 侧强行覆写。这样调用方可以明确选择“只订阅 leader”或“允许订阅 follower”。
@@ -352,10 +352,6 @@ public class EtcdClient implements AutoCloseable {
         }
         boolean leaderOnly = request.isLeaderOnly();
 
-        // 1) 先确定本次 watch 会话 ID：外部已指定则沿用，未指定则由客户端分配。
-        long requestedWatchId = request.getWatchId() > 0L ? request.getWatchId() : nextWatchId();
-        request.setWatchId(requestedWatchId);
-
         /**
          * TODO:
          *  leaderOnly=true 时，订阅握手要求最终落到 Leader；收到 notLeader 后按 leaderId 跳转重试。
@@ -364,65 +360,69 @@ public class EtcdClient implements AutoCloseable {
         Exception lastException = null;
         for (int retryIndex = 0; retryIndex < candidateEndpoints.size(); retryIndex++) {
             NodeEndpoint endpoint = candidateEndpoints.get(retryIndex);
-            WatchSubscription subscription = null;
-            try {
-                // 2) 为当前 watch 会话分配独立 rpcMessageId，用于同一 TCP 连接下的多路分发。
-                String rpcMessageId = nextWatchRpcMessageId(endpoint);
-                subscription = new WatchSubscription(
-                        rpcClient,
-                        watchSubscriptionRegistry,
-                        requestedWatchId,
-                        rpcMessageId,
-                        endpoint,
-                        listener,
-                        WATCH_SUBSCRIBE_ACK_TIMEOUT_MILLIS);
-                // TODO:watchListener 与 watchHandle 一对一绑定；先绑定句柄，再注册路由并发起订阅。
-                listener.bindWatchHandle(subscription);
-                // 3) 先注册路由，再发请求，避免响应先到时找不到本地订阅上下文。
-                watchSubscriptionRegistry.register(subscription);
-
-                // 4) 发送 subscribe 一元请求，并阻塞等待首帧 ACK（由订阅对象内部 future 协调）。
-                EtcdRpcResponse<WatchSubscribeResponse> subscribeResponse = subscription.subscribe(request);
-                if (subscribeResponse != null && subscribeResponse.getHeader() != null && subscribeResponse.getHeader().isSuccess()) {
-                    if (leaderOnly) {
-                        // 默认 watch 成功后，把当前 endpoint 视为 leader 路由优先节点。
-                        currentEndpoint = endpoint;
-                    }
-                    return subscription;
-                }
-
-                // 6) leaderOnly 订阅允许根据 notLeader + leaderId 做 leader 跳转重试。
-                if (leaderOnly && subscribeResponse != null && subscribeResponse.shouldRetryLeader()) {
-                    NodeEndpoint leaderEndpoint = endpointMap.get(subscribeResponse.getLeaderId());
-                    if (subscription != null) {
-                        subscription.close();
-                    }
-                    if (leaderEndpoint != null && !containsEndpoint(candidateEndpoints, leaderEndpoint)) {
-                        candidateEndpoints.add(0, leaderEndpoint);
-                        retryIndex = -1;
-                        continue;
-                    }
-                }
-
-                // 7) 非 leader 跳转场景的失败：直接终止，避免掩盖业务错误。
-                subscription.close();
-                if (subscribeResponse != null && subscribeResponse.getHeader() != null) {
-                    lastException = new IllegalStateException(subscribeResponse.getHeader().getMessage());
-                    break;
-                }
-                lastException = new IllegalStateException("watch subscribe failed");
-                break;
-            } catch (Exception exception) {
-                // 8) 节点异常或超时场景：关闭当前订阅并切下一个 endpoint 重试。
-                lastException = exception;
-                if (subscription != null) {
-                    subscription.close();
-                }
+            for (int endpointAttempt = 0; endpointAttempt < WATCH_SUBSCRIBE_MAX_ATTEMPTS_PER_ENDPOINT; endpointAttempt++) {
+                DefaultWatchHandle watchHandle = null;
                 try {
-                    Thread.sleep(80L);
-                } catch (InterruptedException interruptedException) {
-                    Thread.currentThread().interrupt();
+                    // 1) 为当前 watch 会话分配独立 rpcMessageId，用于同一 TCP 连接下的多路分发。
+                    String rpcMessageId = nextWatchRpcMessageId(endpoint);
+                    watchHandle = new DefaultWatchHandle(
+                            rpcClient,
+                            watchHandleRegistry,
+                            rpcMessageId,
+                            endpoint,
+                            listener,
+                            WATCH_SUBSCRIBE_ACK_TIMEOUT_MILLIS);
+                    // TODO:watchListener 与 watchHandle 一对一绑定；先绑定句柄，再注册路由并发起订阅。
+                    listener.bindWatchHandle(watchHandle);
+                    // 2) 先注册路由，再发请求，避免响应先到时找不到本地订阅上下文。
+                    watchHandleRegistry.register(watchHandle);
+
+                    // 3) 发送 subscribe 一元请求，并阻塞等待首帧 ACK（由 watchHandle 内部 future 协调）。
+                    EtcdRpcResponse<WatchSubscribeResponse> subscribeResponse = watchHandle.subscribe(request);
+                    if (subscribeResponse != null && subscribeResponse.getHeader() != null && subscribeResponse.getHeader().isSuccess()) {
+                        if (leaderOnly) {
+                            // 4) 默认 watch 成功后，把当前 endpoint 视为 leader 路由优先节点。
+                            currentEndpoint = endpoint;
+                        }
+                        return watchHandle;
+                    }
+
+                    // 5) leaderOnly 订阅允许根据 notLeader + leaderId 做 leader 跳转重试。
+                    if (leaderOnly && subscribeResponse != null && subscribeResponse.shouldRetryLeader()) {
+                        NodeEndpoint leaderEndpoint = endpointMap.get(subscribeResponse.getLeaderId());
+                        if (watchHandle != null) {
+                            watchHandle.close();
+                        }
+                        if (leaderEndpoint != null && !containsEndpoint(candidateEndpoints, leaderEndpoint)) {
+                            candidateEndpoints.add(0, leaderEndpoint);
+                            retryIndex = -1;
+                            break;
+                        }
+                    }
+
+                    // 6) 非 leader 跳转场景的失败：直接终止，避免掩盖业务错误。
+                    watchHandle.close();
+                    if (subscribeResponse != null && subscribeResponse.getHeader() != null) {
+                        lastException = new IllegalStateException(subscribeResponse.getHeader().getMessage());
+                        break;
+                    }
+                    lastException = new IllegalStateException("watch subscribe failed");
                     break;
+                } catch (Exception exception) {
+                    // 7) 节点异常或超时场景：关闭当前订阅并在同一 endpoint 内做有限次重试。
+                    lastException = exception;
+                    if (watchHandle != null) {
+                        watchHandle.close();
+                    }
+                    if (endpointAttempt >= WATCH_SUBSCRIBE_MAX_ATTEMPTS_PER_ENDPOINT - 1) {
+                        break;
+                    }
+                    try {
+                        Thread.sleep(80L);
+                    } catch (InterruptedException interruptedException) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                 }
             }
         }
@@ -612,14 +612,6 @@ public class EtcdClient implements AutoCloseable {
     public List<NodeEndpoint> getEndpointsSnapshot() {
         List<NodeEndpoint> endpointList = new ArrayList<>(endpointMap.values());
         return Collections.unmodifiableList(endpointList);
-    }
-
-    /**
-     * 分配下一个 watchId。
-     */
-    private long nextWatchId() {
-        long nextWatchId = WATCH_ID_SEQUENCE.incrementAndGet();
-        return nextWatchId <= 0L ? Math.abs(nextWatchId) + 1L : nextWatchId;
     }
 
     /**

@@ -32,7 +32,7 @@ classDiagram
       -RpcClient rpcClient
       -Map_String_NodeEndpoint endpointMap
       -NodeEndpoint currentEndpoint
-      -WatchSubscriptionRegistry watchSubscriptionRegistry
+      -WatchHandleRegistry watchHandleRegistry
       +put()
       +get()
       +range()
@@ -52,18 +52,17 @@ classDiagram
       +close()
     }
 
-    class WatchSubscriptionRegistry {
-      -Map_Long_WatchSubscription byWatchId
-      -Map_String_WatchSubscription byRpcMessageId
+    class WatchHandleRegistry {
+      -Map_Long_DefaultWatchHandle byWatchId
+      -Map_String_DefaultWatchHandle byRpcMessageId
       +register()
       +remove()
       +handle()
       +handleConnectionClosed()
     }
 
-    class WatchSubscription {
+    class DefaultWatchHandle {
       +subscribe()
-      +cancel()
       +close()
       +handleMessage()
     }
@@ -71,10 +70,10 @@ classDiagram
     class WatchHandle
     class WatchListener
 
-    EtcdClient --> WatchSubscriptionRegistry
-    WatchSubscriptionRegistry --> WatchSubscription
-    WatchSubscription ..|> WatchHandle
-    WatchSubscription --> WatchListener
+    EtcdClient --> WatchHandleRegistry
+    WatchHandleRegistry --> DefaultWatchHandle
+    DefaultWatchHandle ..|> WatchHandle
+    DefaultWatchHandle --> WatchListener
 ```
 
 ## 4. 普通请求最短路径（以 PUT 为例）
@@ -128,8 +127,9 @@ sequenceDiagram
 ### 6.1 三个标识
 
 1. `endpoint`：订阅目标节点。
-2. `watchId`：业务订阅会话 ID。
+2. `watchId`：业务订阅会话 ID（由服务端 subscribe ACK 返回）。
 3. `rpcMessageId`：RPC 路由 ID（用于同连接多路分发）。
+4. `WatchHandle.getWatchId()`：在 subscribe ACK 前返回 `0`，ACK 成功后返回服务端分配的正数 `watchId`。
 
 ### 6.2 订阅与推送流程
 
@@ -137,19 +137,20 @@ sequenceDiagram
 sequenceDiagram
     participant App as 应用
     participant Client as EtcdClient
-    participant Sub as WatchSubscription
-    participant Reg as WatchSubscriptionRegistry
+    participant Sub as DefaultWatchHandle
+    participant Reg as WatchHandleRegistry
     participant Rpc as RpcClient
     participant Node as EtcdNode
 
     App->>Client: watch(request, listener)
-    Client->>Sub: 创建订阅对象(watchId + rpcMessageId)
-    Client->>Reg: register(subscription)
+    Client->>Sub: 创建订阅对象(rpcMessageId)
+    Client->>Reg: register(handle)
     Sub->>Rpc: sendRequestWithRpcMessageId(subscribe)
     Rpc->>Node: REQUEST(subscribe)
     Node-->>Rpc: RESPONSE(subscribe ack)
     Rpc-->>Reg: 按 rpcMessageId 分发
     Reg-->>Sub: handleMessage(RESPONSE)
+    Sub->>Sub: 绑定服务端 watchId
     Node-->>Rpc: STREAM(notification)
     Rpc-->>Reg: 按 rpcMessageId 分发
     Reg-->>Sub: handleMessage(STREAM)
@@ -161,14 +162,14 @@ sequenceDiagram
 
 1. 多个 watch 可以落在同一 TCP channel。
 2. 每个 watch 绑定不同 `rpcMessageId`。
-3. `WatchSubscriptionRegistry` 用 `rpcMessageId -> WatchSubscription` 精确路由。
+3. `WatchHandleRegistry` 用 `rpcMessageId -> DefaultWatchHandle` 精确路由。
 
 ### 6.4 `WatchListener` 与 `WatchHandle` 关系
 
 当前实现是“一对一”：
 
-1. 每次 `watch(...)` 会创建一个 `WatchSubscription`（实现 `WatchHandle`）。
-2. SDK 会调用 `listener.bindWatchHandle(subscription)` 绑定该句柄。
+1. 每次 `watch(...)` 会创建一个 `DefaultWatchHandle`（实现 `WatchHandle`）。
+2. SDK 会调用 `listener.bindWatchHandle(handle)` 绑定该句柄。
 3. 一个 `WatchListener` 实例不应复用到多个并发 watch。
 
 ### 6.5 `leaderOnly` 与指定 endpoint 约束
@@ -182,9 +183,13 @@ sequenceDiagram
 
 ### 7.1 已保证的行为
 
-1. `cancel()` 会发送取消请求并等待取消 ACK。
-2. 成功路径会执行本地 `close()` 收敛，句柄进入 `CLOSED`。
+1. `close()` 会在合适阶段发送取消请求并等待取消 ACK。
+2. 成功路径会执行本地收敛，句柄进入 `CLOSED`。
 3. 关闭时会清理注册表与 rpc handler，防止后续持续路由。
+
+补充：`SUBSCRIBING` 阶段若调用 `close()`，SDK 会先标记 `cancelOnSubscribeAckRequested=true`，等拿到服务端 `watchId` 后立即发送 cancel，收敛本地关闭与服务端创建并发窗口。
+补充：若收到 `watchId` 与本地句柄不匹配的响应或推送，SDK 会主动发送 `WatchCancelRequest(unknownWatchId)` 回收服务端异常残留会话。
+补充：`watch(...)` 成功返回仅表示 SDK 已完成 subscribe ACK；业务层是否“把该句柄纳入本地会话表”由上层决定（例如 console 当前选择在 `onSubscribed` 回调后才登记会话）。
 
 ### 7.2 当前可容忍窗口
 

@@ -6,9 +6,9 @@ import com.xhj.etcd.serializer.Serializer;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelId;
 
-import java.util.Queue;
+import java.util.Deque;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -84,7 +84,12 @@ public class WatchChannelWriteRegistry {
         rpcMessage.setType(messageType);
         rpcMessage.setRpcMessageId(rpcMessageId);
         rpcMessage.setData(serializer.serialize(payload));
-        state.getOutboundQueue().offer(rpcMessage);
+        if (messageType == RpcMessageType.RESPONSE) {
+            // TODO: 控制面响应优先级高于事件流。订阅/取消的 RESPONSE 若被大量 STREAM 淹没，会放大客户端握手超时风险。
+            state.getControlOutboundQueue().offer(rpcMessage);
+        } else {
+            state.getStreamOutboundQueue().offer(rpcMessage);
+        }
 
         /**
          * TODO:
@@ -155,25 +160,27 @@ public class WatchChannelWriteRegistry {
      */
     private void drainInEventLoop(WatchChannelWriteQueueState state) {
         Channel channel = state.getChannel();
-        Queue<RpcMessage> outboundQueue = state.getOutboundQueue();
+        Deque<RpcMessage> controlOutboundQueue = state.getControlOutboundQueue();
+        Deque<RpcMessage> streamOutboundQueue = state.getStreamOutboundQueue();
         int drainedCount = 0;
 
         while (drainedCount < MAX_MESSAGES_PER_DRAIN) {
             if (channel == null || !channel.isActive()) {
                 // 连接已关闭时清空积压消息，防止该 channel 写状态长期堆积无效数据。
-                outboundQueue.clear();
+                controlOutboundQueue.clear();
+                streamOutboundQueue.clear();
                 break;
             }
 
             // TODO:poll 是非阻塞调用；队列为空会立即返回 null，不会阻塞 eventLoop。
-            RpcMessage rpcMessage = outboundQueue.poll();
+            RpcMessage rpcMessage = pollNextOutboundMessage(controlOutboundQueue, streamOutboundQueue);
             if (rpcMessage == null) {
                 break;
             }
 
             if (!channel.isWritable()) {
                 // 网络侧背压：本轮先让出 eventLoop，等待下一次调度继续发送。
-                outboundQueue.offer(rpcMessage);
+                requeueMessageToQueueHeadByType(rpcMessage, controlOutboundQueue, streamOutboundQueue);
                 break;
             }
 
@@ -187,10 +194,39 @@ public class WatchChannelWriteRegistry {
         }
 
         state.getDraining().set(false);
-        if (!outboundQueue.isEmpty()) {
+        if (!controlOutboundQueue.isEmpty() || !streamOutboundQueue.isEmpty()) {
             // TODO:本轮达到批量上限或被背压中断时，重新调度下一轮。这样既保持顺序，又不会单次长循环阻塞 eventLoop。
             scheduleDrain(state);
         }
+    }
+
+    /**
+     * 按“控制面优先、数据面次之”顺序弹出下一条消息。
+     */
+    private RpcMessage pollNextOutboundMessage(Deque<RpcMessage> controlOutboundQueue,
+                                               Deque<RpcMessage> streamOutboundQueue) {
+        RpcMessage rpcMessage = controlOutboundQueue.poll();
+        if (rpcMessage != null) {
+            return rpcMessage;
+        }
+        return streamOutboundQueue.poll();
+    }
+
+    /**
+     * 背压时按消息类型回退到对应队首，保持同类型消息顺序稳定。
+     */
+    private void requeueMessageToQueueHeadByType(RpcMessage rpcMessage,
+                                                 Deque<RpcMessage> controlOutboundQueue,
+                                                 Deque<RpcMessage> streamOutboundQueue) {
+        if (rpcMessage == null) {
+            return;
+        }
+        if (rpcMessage.getType() == RpcMessageType.RESPONSE) {
+            // TODO: 背压时必须放回队首，保持原有发送顺序，避免首帧 subscribe RESPONSE 被后续 STREAM 长时间饿死导致客户端握手超时。
+            controlOutboundQueue.offerFirst(rpcMessage);
+            return;
+        }
+        streamOutboundQueue.offerFirst(rpcMessage);
     }
 
     /**
@@ -209,7 +245,12 @@ public class WatchChannelWriteRegistry {
         /**
          * 待发送队列。
          */
-        private final Queue<RpcMessage> outboundQueue = new ConcurrentLinkedQueue<>();
+        private final Deque<RpcMessage> controlOutboundQueue = new ConcurrentLinkedDeque<>();
+
+        /**
+         * 数据面消息队列（watch STREAM）。
+         */
+        private final Deque<RpcMessage> streamOutboundQueue = new ConcurrentLinkedDeque<>();
 
         /**
          * 是否正在发送。
@@ -224,8 +265,12 @@ public class WatchChannelWriteRegistry {
             this.channel = channel;
         }
 
-        public Queue<RpcMessage> getOutboundQueue() {
-            return outboundQueue;
+        public Deque<RpcMessage> getControlOutboundQueue() {
+            return controlOutboundQueue;
+        }
+
+        public Deque<RpcMessage> getStreamOutboundQueue() {
+            return streamOutboundQueue;
         }
 
         public AtomicBoolean getDraining() {

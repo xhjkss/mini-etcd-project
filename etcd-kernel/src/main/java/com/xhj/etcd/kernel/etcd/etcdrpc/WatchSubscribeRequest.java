@@ -18,14 +18,6 @@ public class WatchSubscribeRequest implements Serializable {
     private static final long serialVersionUID = 1L;
 
     /**
-     * Watch 会话 ID。
-     *
-     * <p>这是 watch 的业务会话 id，不是网络层的 streamId。
-     * 客户端会用独立的 streamId 复用同一条 TCP 连接；watchId 只用于服务端会话管理和通知回写定位。</p>
-     */
-    private long watchId;
-
-    /**
      * 起始 key。
      */
     private String startKey;

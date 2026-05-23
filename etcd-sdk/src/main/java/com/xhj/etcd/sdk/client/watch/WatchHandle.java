@@ -12,6 +12,8 @@ public interface WatchHandle {
 
     /**
      * 获取 watchId。
+     *
+     * <p>TODO: watchId 由服务端在 subscribe 成功后分配并返回。SUBSCRIBING 阶段返回 0；收到成功 ACK 后返回正数 watchId。</p>
      */
     long getWatchId();
 
@@ -31,12 +33,10 @@ public interface WatchHandle {
     boolean isPrefixMatch();
 
     /**
-     * 发送取消请求。
-     */
-    void cancel();
-
-    /**
      * 关闭句柄。
+     *
+     * <p>关闭语义：SDK 会先尝试向服务端发送 cancel 请求；无论 cancel 成功、失败或超时，
+     * 最终都会执行本地关闭收敛，保证句柄进入 CLOSED 状态。</p>
      */
     void close();
 
