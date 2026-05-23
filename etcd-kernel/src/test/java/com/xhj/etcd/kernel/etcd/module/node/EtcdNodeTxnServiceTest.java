@@ -7,6 +7,10 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.CompactRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.EtcdRpcResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.RangeRequest;
@@ -196,6 +200,55 @@ public class EtcdNodeTxnServiceTest {
         EtcdRpcResponse<PutResponse> probePutResponse = node.handleEtcdRpcPutRequest(new PutRequest("txn/rollback/probe", "probe"));
         assertTrue(probePutResponse.getHeader().isSuccess());
         assertEquals(baselineRevision + 1L, probePutResponse.getBody().getRevision());
+    }
+
+    @Test
+    public void shouldRollbackLeaseBindingTogetherWhenTxnBranchOperationFails() throws Exception {
+        awaitLeader(node, 3000L);
+
+        EtcdRpcResponse<LeaseGrantResponse> leaseGrantResponse = node.handleEtcdRpcLeaseGrantRequest(new LeaseGrantRequest(0L, 30L));
+        assertNotNull(leaseGrantResponse);
+        assertNotNull(leaseGrantResponse.getHeader());
+        assertTrue(leaseGrantResponse.getHeader().isSuccess());
+        assertNotNull(leaseGrantResponse.getBody());
+        assertNotNull(leaseGrantResponse.getBody().getLease());
+        long leaseId = leaseGrantResponse.getBody().getLease().getLeaseId();
+        assertTrue(leaseId > 0L);
+
+        TxnRequest txnRequest = new TxnRequest();
+        txnRequest.getCompareConditions().add(TxnCompareCondition.version(
+                "txn/lease/rollback/guard",
+                TxnCompareOperatorType.EQUAL,
+                0L));
+        txnRequest.getSuccessOperations().add(TxnOperationRequest.put(
+                new PutRequest("txn/lease/rollback/key", "v1", leaseId)));
+
+        RangeRequest invalidRangeRequest = new RangeRequest();
+        invalidRangeRequest.setStartKey("txn/lease/rollback/z");
+        invalidRangeRequest.setEndKeyExclusive("txn/lease/rollback/a");
+        invalidRangeRequest.setLinearizableRead(false);
+        txnRequest.getSuccessOperations().add(TxnOperationRequest.range(invalidRangeRequest));
+
+        EtcdRpcResponse<TxnResponse> txnResponse = node.handleEtcdRpcTxnRequest(txnRequest);
+        assertNotNull(txnResponse);
+        assertNotNull(txnResponse.getHeader());
+        assertFalse(txnResponse.getHeader().isSuccess());
+        assertNull(txnResponse.getBody());
+
+        EtcdRpcResponse<GetResponse> rolledBackKeyResponse = node.handleEtcdRpcGetRequest(new GetRequest("txn/lease/rollback/key", false));
+        assertNotNull(rolledBackKeyResponse);
+        assertNotNull(rolledBackKeyResponse.getHeader());
+        assertTrue(rolledBackKeyResponse.getHeader().isSuccess());
+        assertNull(rolledBackKeyResponse.getBody().getValue());
+
+        EtcdRpcResponse<LeaseTtlResponse> leaseTtlResponse = node.handleEtcdRpcLeaseTtlRequest(new LeaseTtlRequest(leaseId));
+        assertNotNull(leaseTtlResponse);
+        assertNotNull(leaseTtlResponse.getHeader());
+        assertTrue(leaseTtlResponse.getHeader().isSuccess());
+        assertNotNull(leaseTtlResponse.getBody());
+        assertNotNull(leaseTtlResponse.getBody().getLease());
+        assertNotNull(leaseTtlResponse.getBody().getLease().getKeys());
+        assertTrue(leaseTtlResponse.getBody().getLease().getKeys().isEmpty());
     }
 
     @Test

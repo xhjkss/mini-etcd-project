@@ -2211,11 +2211,20 @@ public class EtcdNode {
          *  3) 保证 Txn 不留下部分写入，符合 compare + branch 的原子提交语义。
          */
         KeyValueStoreSnapshot snapshotBeforeTxn = keyValueStore.createSnapshot();
+        LeaseStoreSnapshot leaseStoreSnapshotBeforeTxn = leaseStore.createSnapshot();
         List<TxnOperationResponse> responseOps = new ArrayList<>();
         try {
             executeTxnBranchOperations(branchOperations, responseOps);
             return TxnResponse.of(compareSucceeded, keyValueStore.currentRevision(), responseOps);
         } catch (Exception exception) {
+            /**
+             * TODO:
+             *  Txn 回滚必须同时恢复 KV + Lease：
+             *  1) 仅恢复 KeyValueStore 会导致 lease 绑定关系与 KV 可见数据不一致；
+             *  2) 分支里若包含 put(leaseId)/delete/deleteRange，leaseStore 也会同步变更；
+             *  3) 因此异常路径要一起恢复 leaseStoreSnapshot，保证状态机整体原子回滚。
+             */
+            leaseStore.restoreSnapshot(leaseStoreSnapshotBeforeTxn);
             keyValueStore.restoreSnapshot(snapshotBeforeTxn);
             throw exception;
         }
