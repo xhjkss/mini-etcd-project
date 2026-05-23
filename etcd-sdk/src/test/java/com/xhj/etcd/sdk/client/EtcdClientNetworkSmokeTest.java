@@ -1,9 +1,15 @@
 package com.xhj.etcd.sdk.client;
 
+import com.xhj.etcd.sdk.client.lease.LeaseHandle;
 import com.xhj.etcd.sdk.client.watch.WatchHandle;
 import com.xhj.etcd.sdk.client.watch.WatchListener;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.GetResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseGrantResponse;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseKeepAliveRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlRequest;
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseTtlResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.PutResponse;
 import com.xhj.etcd.kernel.etcd.etcdrpc.WatchCancelResponse;
@@ -232,6 +238,129 @@ public class EtcdClientNetworkSmokeTest {
         }
     }
 
+    @Test
+    public void shouldSupportLeaseHandleAutoKeepAliveAndStopKeepAliveOnClose() throws Exception {
+        MiniEtcdCluster cluster = new MiniEtcdCluster();
+        cluster.startThreeNodeCluster();
+
+        EtcdClient client = new EtcdClient(cluster.getAllEndpoints());
+        LeaseHandle leaseHandle = null;
+        try {
+            awaitClusterReady(client, TEST_TIMEOUT_MILLIS);
+
+            LeaseGrantResponse leaseGrantResponse = client.leaseGrant(new LeaseGrantRequest(0L, 3L));
+            Assert.assertNotNull("lease grant response must not be null", leaseGrantResponse);
+            Assert.assertNotNull("lease grant lease view must not be null", leaseGrantResponse.getLease());
+            long leaseId = leaseGrantResponse.getLease().getLeaseId();
+            Assert.assertTrue("leaseId must be positive", leaseId > 0L);
+
+            String leaseKey = "smoke/lease/auto/key";
+            client.put(new PutRequest(leaseKey, "v1", leaseId));
+
+            leaseHandle = client.startLeaseKeepAlive(new LeaseKeepAliveRequest(leaseId));
+            Assert.assertNotNull("lease handle must not be null", leaseHandle);
+            Assert.assertFalse("lease handle should be active", leaseHandle.isClosed());
+            Assert.assertEquals("lease handle leaseId mismatch", leaseId, leaseHandle.getLeaseId());
+
+            Thread.sleep(4500L);
+            LeaseTtlResponse activeLeaseTtlResponse = client.leaseTtl(new LeaseTtlRequest(leaseId));
+            Assert.assertNotNull("lease ttl response must not be null while keepAlive running", activeLeaseTtlResponse);
+            Assert.assertNotNull("lease ttl lease view must not be null while keepAlive running", activeLeaseTtlResponse.getLease());
+            Assert.assertTrue("remaining ttl should be positive while keepAlive running", activeLeaseTtlResponse.getLease().getRemainingSeconds() > 0L);
+
+            leaseHandle.close();
+            Assert.assertTrue("lease handle should be closed", leaseHandle.isClosed());
+
+            waitUntilLeaseKeyDeleted(client, leaseKey, 12000L);
+            GetResponse afterExpiredGetResponse = client.get(new GetRequest(leaseKey, false));
+            Assert.assertNotNull("get response must not be null", afterExpiredGetResponse);
+            Assert.assertNull("lease key should be deleted after keepAlive closed and lease expired", afterExpiredGetResponse.getValue());
+            leaseHandle = null;
+        } finally {
+            if (leaseHandle != null) {
+                leaseHandle.close();
+            }
+            client.close();
+            cluster.close();
+        }
+    }
+
+    @Test
+    public void shouldClosePreviousLeaseHandleWhenStartingAutoKeepAliveOnSameLeaseId() throws Exception {
+        MiniEtcdCluster cluster = new MiniEtcdCluster();
+        cluster.startThreeNodeCluster();
+
+        EtcdClient client = new EtcdClient(cluster.getAllEndpoints());
+        LeaseHandle firstLeaseHandle = null;
+        LeaseHandle secondLeaseHandle = null;
+        try {
+            awaitClusterReady(client, TEST_TIMEOUT_MILLIS);
+
+            LeaseGrantResponse leaseGrantResponse = client.leaseGrant(new LeaseGrantRequest(0L, 5L));
+            Assert.assertNotNull("lease grant response must not be null", leaseGrantResponse);
+            Assert.assertNotNull("lease view must not be null", leaseGrantResponse.getLease());
+            long leaseId = leaseGrantResponse.getLease().getLeaseId();
+            Assert.assertTrue("leaseId must be positive", leaseId > 0L);
+
+            firstLeaseHandle = client.startLeaseKeepAlive(new LeaseKeepAliveRequest(leaseId));
+            Assert.assertNotNull("first lease handle must not be null", firstLeaseHandle);
+            Assert.assertFalse("first lease handle should be active", firstLeaseHandle.isClosed());
+
+            secondLeaseHandle = client.startLeaseKeepAlive(new LeaseKeepAliveRequest(leaseId));
+            Assert.assertNotNull("second lease handle must not be null", secondLeaseHandle);
+            Assert.assertFalse("second lease handle should be active", secondLeaseHandle.isClosed());
+            Assert.assertTrue("first lease handle should be closed after same leaseId handle replacement", firstLeaseHandle.isClosed());
+            Assert.assertEquals("second lease handle leaseId mismatch", leaseId, secondLeaseHandle.getLeaseId());
+
+            secondLeaseHandle.close();
+            Assert.assertTrue("second lease handle should be closed", secondLeaseHandle.isClosed());
+            secondLeaseHandle = null;
+        } finally {
+            if (firstLeaseHandle != null) {
+                firstLeaseHandle.close();
+            }
+            if (secondLeaseHandle != null) {
+                secondLeaseHandle.close();
+            }
+            client.close();
+            cluster.close();
+        }
+    }
+
+    @Test
+    public void shouldRevokeLeaseOnCloseWhenGrantAndStartLeaseKeepAlive() throws Exception {
+        MiniEtcdCluster cluster = new MiniEtcdCluster();
+        cluster.startThreeNodeCluster();
+
+        EtcdClient client = new EtcdClient(cluster.getAllEndpoints());
+        LeaseHandle leaseHandle = null;
+        try {
+            awaitClusterReady(client, TEST_TIMEOUT_MILLIS);
+
+            leaseHandle = client.grantAndStartLeaseKeepAlive(new LeaseGrantRequest(0L, 20L));
+            Assert.assertNotNull("lease handle must not be null", leaseHandle);
+            Assert.assertTrue("leaseId must be positive", leaseHandle.getLeaseId() > 0L);
+
+            String leaseKey = "smoke/lease/grant-close-revoke/key";
+            client.put(new PutRequest(leaseKey, "v1", leaseHandle.getLeaseId()));
+
+            leaseHandle.close();
+            Assert.assertTrue("lease handle should be closed", leaseHandle.isClosed());
+
+            waitUntilLeaseKeyDeleted(client, leaseKey, 5000L);
+            GetResponse getResponse = client.get(new GetRequest(leaseKey, false));
+            Assert.assertNotNull("get response must not be null", getResponse);
+            Assert.assertNull("lease key should be deleted after grantAndStart handle close(revoke)", getResponse.getValue());
+            leaseHandle = null;
+        } finally {
+            if (leaseHandle != null) {
+                leaseHandle.close();
+            }
+            client.close();
+            cluster.close();
+        }
+    }
+
     /**
      * 等待集群 leader 可用。
      */
@@ -250,6 +379,21 @@ public class EtcdClientNetworkSmokeTest {
             Thread.sleep(100L);
         }
         throw new AssertionError("cluster is not ready for sdk smoke test", lastException);
+    }
+
+    /**
+     * 等待 lease 绑定 key 被自动删除。
+     */
+    private void waitUntilLeaseKeyDeleted(EtcdClient client, String key, long timeoutMillis) throws Exception {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        while (System.currentTimeMillis() < deadline) {
+            GetResponse getResponse = client.get(new GetRequest(key, false));
+            if (getResponse != null && getResponse.getValue() == null) {
+                return;
+            }
+            Thread.sleep(200L);
+        }
+        throw new AssertionError("lease key is not deleted after timeout, key=" + key);
     }
 
     /**
@@ -354,6 +498,10 @@ public class EtcdClientNetworkSmokeTest {
                         node,
                         EtcdNode.HANDLE_ETCD_RPC_PUT_REQUEST_METHOD_NAME,
                         EtcdNode.HANDLE_ETCD_RPC_GET_REQUEST_METHOD_NAME,
+                        EtcdNode.HANDLE_ETCD_RPC_LEASE_GRANT_REQUEST_METHOD_NAME,
+                        EtcdNode.HANDLE_ETCD_RPC_LEASE_KEEP_ALIVE_REQUEST_METHOD_NAME,
+                        EtcdNode.HANDLE_ETCD_RPC_LEASE_REVOKE_REQUEST_METHOD_NAME,
+                        EtcdNode.HANDLE_ETCD_RPC_LEASE_TTL_REQUEST_METHOD_NAME,
                         EtcdNode.HANDLE_ETCD_RPC_WATCH_SUBSCRIBE_REQUEST_METHOD_NAME,
                         EtcdNode.HANDLE_ETCD_RPC_WATCH_CANCEL_REQUEST_METHOD_NAME,
                         EtcdNode.HANDLE_RAFT_RPC_REQUEST_VOTE_REQUEST_METHOD_NAME,

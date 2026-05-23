@@ -1,5 +1,7 @@
 package com.xhj.etcd.sdk.client;
 
+import com.xhj.etcd.sdk.client.lease.DefaultLeaseHandle;
+import com.xhj.etcd.sdk.client.lease.LeaseHandle;
 import com.xhj.etcd.sdk.client.watch.WatchHandle;
 import com.xhj.etcd.sdk.client.watch.WatchListener;
 import com.xhj.etcd.sdk.client.watch.DefaultWatchHandle;
@@ -47,7 +49,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * EtcdClient
@@ -105,6 +113,16 @@ public class EtcdClient implements AutoCloseable {
     private final String clientId = UUID.randomUUID().toString();
 
     /**
+     * Lease 自动续约句柄映射：leaseId -> leaseHandle。
+     */
+    private final ConcurrentMap<Long, DefaultLeaseHandle> leaseHandleByLeaseId = new ConcurrentHashMap<>();
+
+    /**
+     * Lease 生命周期任务调度器（keepAlive/revoke）。
+     */
+    private final ScheduledExecutorService leaseLifecycleTaskScheduler;
+
+    /**
      * 使用单节点地址构造客户端。
      */
     public EtcdClient(RpcClient rpcClient, NodeEndpoint endpoint) {
@@ -130,6 +148,7 @@ public class EtcdClient implements AutoCloseable {
         }
         this.currentEndpoint = endpoints.get(0);
         this.maxLeaderRetryTimes = Math.max(1, this.endpointMap.size());
+        this.leaseLifecycleTaskScheduler = buildLeaseLifecycleTaskScheduler();
     }
 
     /**
@@ -137,6 +156,32 @@ public class EtcdClient implements AutoCloseable {
      */
     public EtcdClient(List<NodeEndpoint> endpoints) {
         this(new NettyRpcClient(SerializerRegistry.getDefaultSerializer(), 5000L), endpoints);
+    }
+
+    /**
+     * 构建 Lease 生命周期任务调度器。
+     */
+    private ScheduledExecutorService buildLeaseLifecycleTaskScheduler() {
+        int cpuCount = Runtime.getRuntime().availableProcessors();
+        int coreThreadCount = Math.min(Math.max(2, cpuCount * 2), 8);
+        ScheduledThreadPoolExecutor scheduledThreadPoolExecutor = new ScheduledThreadPoolExecutor(coreThreadCount, new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable runnable) {
+                Thread thread = new Thread(runnable, "sdk-lease-lifecycle-task-" + clientId);
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+        /**
+         * TODO:
+         *  调度器策略：
+         *  1) removeOnCancel=true：cancel 后立即把任务从延迟队列移除；
+         *  2) shutdown 后不再执行剩余 delayed/periodic 任务。
+         */
+        scheduledThreadPoolExecutor.setRemoveOnCancelPolicy(true);
+        scheduledThreadPoolExecutor.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
+        scheduledThreadPoolExecutor.setContinueExistingPeriodicTasksAfterShutdownPolicy(false);
+        return scheduledThreadPoolExecutor;
     }
 
     /**
@@ -148,6 +193,13 @@ public class EtcdClient implements AutoCloseable {
 
     @Override
     public void close() {
+        // TODO: 先关闭所有 leaseHandle（停止 keepAlive + 最佳努力 revoke），再关闭调度器和 rpcClient。
+        for (DefaultLeaseHandle leaseHandle : new ArrayList<>(leaseHandleByLeaseId.values())) {
+            if (leaseHandle != null) {
+                leaseHandle.close();
+            }
+        }
+        leaseLifecycleTaskScheduler.shutdownNow();
         rpcClient.shutdown();
     }
 
@@ -286,6 +338,96 @@ public class EtcdClient implements AutoCloseable {
      */
     public LeaseListResponse leaseList(LeaseListRequest request) {
         return callLeaderRoutedEtcdRequest(EtcdNode.HANDLE_ETCD_RPC_LEASE_LIST_REQUEST_METHOD_NAME, request, LeaseListResponse.class);
+    }
+
+    /**
+     * 启动 Lease 自动续约。
+     *
+     * <p>
+     * TODO:
+     *  1) 先用 leaseKeepAlive 请求校验 lease 可续约并拿到 bootstrap 响应；
+     *  2) 再创建 DefaultLeaseHandle，并按 bootstrap 计算的周期启动调度；
+     *  3) 该入口创建的句柄 close 默认不 revoke。
+     * </p>
+     */
+    public LeaseHandle startLeaseKeepAlive(LeaseKeepAliveRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("lease keepalive request must not be null");
+        }
+        if (request.getLeaseId() <= 0L) {
+            throw new IllegalArgumentException("leaseId must be positive");
+        }
+        // TODO: 接管已有 lease，不改变租约所有权；close 时仅停止本地续约。
+        return createAndStartLeaseHandle(request.getLeaseId(), false);
+    }
+
+    /**
+     * Grant 并启动 Lease 自动续约。
+     *
+     * <p>
+     * TODO:
+     *  grantAndStart 流程：
+     *  1) 先 grant 获取服务端分配 leaseId；
+     *  2) 再创建并启动 DefaultLeaseHandle；
+     *  3) 该入口创建的句柄 close 默认 revoke。
+     * </p>
+     */
+    public LeaseHandle grantAndStartLeaseKeepAlive(LeaseGrantRequest request) {
+        if (request == null) {
+            throw new IllegalArgumentException("lease grant request must not be null");
+        }
+        LeaseGrantResponse leaseGrantResponse = leaseGrant(request);
+        if (leaseGrantResponse == null || leaseGrantResponse.getLease() == null || leaseGrantResponse.getLease().getLeaseId() <= 0L) {
+            throw new IllegalStateException("lease grant response must contain positive leaseId");
+        }
+        return createAndStartLeaseHandle(leaseGrantResponse.getLease().getLeaseId(), true);
+    }
+
+    /**
+     * 创建并启动 LeaseHandle。
+     *
+     * @param leaseId       leaseId
+     * @param revokeOnClose close 是否 revoke
+     * @return LeaseHandle
+     */
+    private LeaseHandle createAndStartLeaseHandle(long leaseId, boolean revokeOnClose) {
+        // TODO: 先执行一次 keepAlive，作为句柄创建前的 bootstrap 校验与周期初始化输入。
+        LeaseKeepAliveResponse bootstrapKeepAliveResponse = leaseKeepAlive(new LeaseKeepAliveRequest(leaseId));
+        if (bootstrapKeepAliveResponse == null || bootstrapKeepAliveResponse.getLease() == null) {
+            throw new IllegalStateException("lease keepAlive bootstrap response must not be null, leaseId=" + leaseId);
+        }
+        /**
+         * TODO:
+         *  onClosedCallback 需要在句柄构造前定义，但回调里又要引用“当前句柄”。
+         *  Java 8 闭包只能捕获 final/effectively-final 局部变量，这里用 AtomicReference 持有该引用。
+         */
+        final AtomicReference<DefaultLeaseHandle> leaseHandleRef = new AtomicReference<>();
+        Runnable onClosedCallback = new Runnable() {
+            @Override
+            public void run() {
+                DefaultLeaseHandle closingLeaseHandle = leaseHandleRef.get();
+                if (closingLeaseHandle == null) {
+                    return;
+                }
+                // TODO:同 leaseId 句柄替换时，按 key+value 移除，确保旧句柄 close 不会误删新句柄索引。
+                leaseHandleByLeaseId.remove(leaseId, closingLeaseHandle);
+            }
+        };
+        DefaultLeaseHandle leaseHandle = new DefaultLeaseHandle(
+                this,
+                leaseId,
+                leaseLifecycleTaskScheduler,
+                revokeOnClose,
+                onClosedCallback,
+                bootstrapKeepAliveResponse);
+        leaseHandleRef.set(leaseHandle);
+        DefaultLeaseHandle previousLeaseHandle = leaseHandleByLeaseId.put(leaseId, leaseHandle);
+        if (previousLeaseHandle != null) {
+            // TODO: 同 leaseId 新句柄接管时，主动关闭旧句柄，避免双调度并发续约。
+            previousLeaseHandle.close();
+        }
+        leaseHandle.startAutoKeepAlive();
+        return leaseHandle;
     }
 
     /**

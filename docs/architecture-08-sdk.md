@@ -8,6 +8,7 @@
 2. Leader 路由与本地读分流规则。
 3. watch 在同一 TCP 连接上的多路复用机制。
 4. watch cancel 收敛语义与当前边界。
+5. LeaseHandle 自动续约句柄的生命周期边界。
 
 ## 2. 小白先看：SDK 现在是什么
 
@@ -18,6 +19,7 @@ SDK 的对外入口是一个类：`com.xhj.etcd.sdk.client.EtcdClient`。
 1. 暴露统一 API（`put/get/range/delete/txn/compact/lease/watch`）。
 2. 处理客户端路由（leader 重试、指定节点访问）。
 3. 管理 watch 的订阅、取消、消息分发。
+4. 管理 LeaseHandle 的自动续约与关闭收敛。
 
 它不负责：
 
@@ -33,6 +35,7 @@ classDiagram
       -Map_String_NodeEndpoint endpointMap
       -NodeEndpoint currentEndpoint
       -WatchHandleRegistry watchHandleRegistry
+      -Map_Long_DefaultLeaseHandle leaseHandleByLeaseId
       +put()
       +get()
       +range()
@@ -45,6 +48,8 @@ classDiagram
       +leaseRevoke()
       +leaseTtl()
       +leaseList()
+      +startLeaseKeepAlive()
+      +grantAndStartLeaseKeepAlive()
       +watch()
       +watch(endpoint overload)
       +computeKvStateHash()
@@ -69,11 +74,19 @@ classDiagram
 
     class WatchHandle
     class WatchListener
+    class DefaultLeaseHandle {
+      +startAutoKeepAlive()
+      +close()
+      +getLeaseView()
+    }
+    class LeaseHandle
 
     EtcdClient --> WatchHandleRegistry
     WatchHandleRegistry --> DefaultWatchHandle
     DefaultWatchHandle ..|> WatchHandle
     DefaultWatchHandle --> WatchListener
+    EtcdClient --> DefaultLeaseHandle
+    DefaultLeaseHandle ..|> LeaseHandle
 ```
 
 ## 4. 普通请求最短路径（以 PUT 为例）
@@ -203,11 +216,19 @@ sequenceDiagram
 
 ## 8. `close()` 语义（当前实现）
 
+### 8.1 LeaseHandle close 语义
+
+1. `startLeaseKeepAlive(...)`：接管已有 lease，`close()` 默认只停止 keepAlive，不自动 revoke。
+2. `grantAndStartLeaseKeepAlive(...)`：创建并托管 lease，`close()` 默认会最佳努力 revoke。
+3. 同一个 `leaseId` 只能有一个活跃 `LeaseHandle`；新句柄会替换并关闭旧句柄。
+
+### 8.2 EtcdClient close 语义
+
 当前 `EtcdClient.close()` 会直接调用 `rpcClient.shutdown()`。
 
 这意味着：
 
-1. 关闭 `EtcdClient` 会关闭其持有的 RPC 客户端。
+1. 关闭 `EtcdClient` 会先关闭所有 LeaseHandle，再关闭其持有的 RPC 客户端。
 2. 若多个组件共享同一个 `RpcClient`，调用方需要自行管理关闭时机。
 
 ## 9. SDK 测试分工
