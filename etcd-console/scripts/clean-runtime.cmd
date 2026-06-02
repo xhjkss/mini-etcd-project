@@ -6,7 +6,7 @@ rem mini-etcd runtime cleanup script (Windows CMD)
 rem
 rem What this script does:
 rem 1) Stop running node processes found from runtime PID files.
-rem 2) Kill residual MiniEtcdNodeLauncher java processes as fallback.
+rem 2) Kill residual MiniEtcdNodeLauncher java processes as fallback when cleaning all profiles.
 rem 3) Remove runtime artifacts:
 rem    - data
 rem    - logs
@@ -21,6 +21,7 @@ rem ==================== Paths (relative) ====================
 set "SCRIPT_DIR=%~dp0"
 set "RUNTIME_DIR=%SCRIPT_DIR%runtime"
 set "PROFILE="
+set "NO_PAUSE=0"
 
 rem ==================== Parse Args ====================
 rem Supported formats:
@@ -34,6 +35,22 @@ set "ARG_VALUE="
 for /f "tokens=1,2 delims==" %%A in ("%ARG%") do (
     set "ARG_KEY=%%~A"
     set "ARG_VALUE=%%~B"
+)
+
+if /I "!ARG_KEY!"=="--noPause" (
+    if "!ARG_VALUE!"=="" (
+        set "NO_PAUSE=1"
+    ) else if /I "!ARG_VALUE!"=="true" (
+        set "NO_PAUSE=1"
+    ) else if /I "!ARG_VALUE!"=="false" (
+        set "NO_PAUSE=0"
+    ) else (
+        echo [mini-etcd] --noPause only supports true or false.
+        set "FAIL_MESSAGE=invalid --noPause value."
+        goto :fail_and_exit
+    )
+    shift
+    goto parse_args
 )
 
 if "!ARG_VALUE!"=="" (
@@ -81,7 +98,8 @@ set "PROFILE_RUNTIME_DIR=%RUNTIME_DIR%\profiles\%PROFILE%"
 if exist "%PROFILE_RUNTIME_DIR%" (
     echo [mini-etcd] cleaning runtime profile: runtime\profiles\%PROFILE%
     call :stop_nodes_by_pid_file "%PROFILE_RUNTIME_DIR%\state\cluster.pids"
-    call :stop_residual_launcher_processes
+    rem Profile cleanup must not kill Java processes from other profiles.
+    rem Global residual cleanup is only safe when cleaning the whole runtime directory.
     rmdir /s /q "%PROFILE_RUNTIME_DIR%" >nul 2>nul
 ) else (
     echo [mini-etcd] profile runtime directory not found: runtime\profiles\%PROFILE%
@@ -103,16 +121,20 @@ set "TARGET_PID_FILE=%~1"
 if not exist "%TARGET_PID_FILE%" exit /b 0
 for /f "usebackq tokens=1-5 delims=|" %%A in ("%TARGET_PID_FILE%") do (
     if not "%%B"=="" taskkill /PID %%B /T /F >nul 2>nul
+    if not "%%B"=="" echo [mini-etcd] stopped %%A, pid=%%B
 )
 del /f /q "%TARGET_PID_FILE%" >nul 2>nul
 exit /b 0
 
 :stop_residual_launcher_processes
 rem Fallback kill: remove leaked Java processes containing MiniEtcdNodeLauncher.
-for /f "tokens=2 delims==" %%P in ('wmic process where "Name='java.exe' and CommandLine like '%%MiniEtcdNodeLauncher%%'" get ProcessId /value ^| find "="') do (
+for /f "tokens=2 delims==" %%P in ('wmic process where "Name='java.exe' and CommandLine like '%%MiniEtcdNodeLauncher%%'" get ProcessId /value 2^>nul ^| find "="') do (
     set "RESIDUAL_PID=%%P"
     for /f "tokens=1 delims= " %%Q in ("!RESIDUAL_PID!") do (
-        if not "%%Q"=="" taskkill /PID %%Q /T /F >nul 2>nul
+        if not "%%Q"=="" (
+            taskkill /PID %%Q /T /F >nul 2>nul
+            echo [mini-etcd] stopped residual MiniEtcdNodeLauncher, pid=%%Q
+        )
     )
 )
 exit /b 0
@@ -120,6 +142,7 @@ exit /b 0
 :fail_and_exit
 rem Unified failure exit.
 if not "%FAIL_MESSAGE%"=="" echo [mini-etcd] error: %FAIL_MESSAGE%
+if "%NO_PAUSE%"=="1" exit /b 1
 if /I "%MINI_ETCD_NO_PAUSE%"=="1" exit /b 1
 echo [mini-etcd] press any key to close...
 pause >nul
@@ -127,6 +150,7 @@ exit /b 1
 
 :success_and_exit
 rem Unified success exit.
+if "%NO_PAUSE%"=="1" exit /b 0
 if /I "%MINI_ETCD_NO_PAUSE%"=="1" exit /b 0
 echo [mini-etcd] press any key to close...
 pause >nul

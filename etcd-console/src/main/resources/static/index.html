@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mini Etcd Console</title>
     <link rel="stylesheet" href="/lib/element-ui/theme-chalk/index.min.css">
-    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="/css/style.css?v=20260603-3">
 </head>
 <body>
 <div id="app" v-cloak>
@@ -37,49 +37,56 @@
                 </div>
                 <div class="header-actions">
                     <el-tag :type="webSocketConnected ? 'success' : 'danger'" size="medium">WebSocket：{{ webSocketConnected ? '已连接' : '未连接' }}</el-tag>
-                    <el-tag size="medium">WS诊断：{{ webSocketStatsLabel }}</el-tag>
                     <el-tag :type="clusterHealthTagType" size="medium">集群：{{ clusterHealthLabel }}</el-tag>
                     <el-tag size="medium">Leader：{{ leaderDisplay || '-' }}</el-tag>
-                    <el-button size="small" icon="el-icon-question" @click="onboardingGuideVisible = !onboardingGuideVisible">{{ onboardingGuideVisible ? '收起引导' : '新手引导' }}</el-button>
                     <el-button size="small" icon="el-icon-refresh" @click="uiRefreshAll">刷新</el-button>
                     <el-button size="small" type="primary" icon="el-icon-connection" @click="uiOpenConnectionsView">连接管理</el-button>
                 </div>
             </el-header>
 
             <el-main class="console-main">
-                <el-card v-if="showOnboardingGuide" shadow="never" class="module-card onboarding-card bottom-space">
+                <el-card shadow="never" class="module-card bottom-space context-card">
                     <div slot="header" class="card-header">
                         <div>
-                            <div class="card-title">快速上手（3 步）</div>
-                            <div class="card-desc">按顺序完成连接、选择连接、执行操作。每一步都提供跳转入口。</div>
+                            <div class="card-title">当前操作上下文</div>
+                            <div class="card-desc">只保留当前操作真正需要的信息：页面、连接、角色、下一步。</div>
                         </div>
-                        <el-button size="mini" type="text" @click="uiCloseOnboardingGuide">收起</el-button>
+                        <el-tag :type="globalGuideTagType">{{ globalGuideTitle }}</el-tag>
                     </div>
-                    <el-steps :active="onboardingActiveStep" finish-status="success" align-center>
-                        <el-step title="连接节点" description="在连接管理中输入 host:port 并连接"></el-step>
-                        <el-step title="选择连接" description="在左侧“当前操作连接”中选择节点"></el-step>
-                        <el-step title="执行操作" description="进入数据浏览或操作中心执行操作"></el-step>
-                    </el-steps>
+                    <el-alert :type="globalGuideTagType" :closable="false" :title="globalGuideMessage"></el-alert>
+                    <el-row :gutter="12" class="summary-row top-space">
+                        <el-col :span="6">
+                            <el-card shadow="never">
+                                <div class="metric-label">当前页面</div>
+                                <div class="metric-value">{{ activeViewLabel }}</div>
+                            </el-card>
+                        </el-col>
+                        <el-col :span="6">
+                            <el-card shadow="never">
+                                <div class="metric-label">当前操作连接</div>
+                                <div class="metric-value">{{ currentEndpointLabel || '-' }}</div>
+                            </el-card>
+                        </el-col>
+                        <el-col :span="6">
+                            <el-card shadow="never">
+                                <div class="metric-label">当前角色</div>
+                                <div class="metric-value">{{ currentOperationRoleLabel }}</div>
+                            </el-card>
+                        </el-col>
+                        <el-col :span="6">
+                            <el-card shadow="never">
+                                <div class="metric-label">下一步</div>
+                                <div class="metric-value">{{ globalGuideNextStep }}</div>
+                            </el-card>
+                        </el-col>
+                    </el-row>
                     <div class="onboarding-actions">
-                        <el-button size="mini" @click="uiOpenConnectionsView">去连接管理</el-button>
-                        <el-button size="mini" :disabled="!connections.length" @click="uiOpenBrowserView">去数据浏览</el-button>
-                        <el-button size="mini" type="primary" :disabled="!hasCurrentConnection" @click="uiOpenOperationsView">去操作中心</el-button>
+                        <el-button size="mini" @click="uiOpenConnectionsView">连接管理</el-button>
+                        <el-button size="mini" :disabled="!connections.length" @click="uiOpenBrowserView">数据浏览</el-button>
+                        <el-button size="mini" :disabled="!hasCurrentConnection" @click="uiOpenOperationsView">操作中心</el-button>
+                        <el-button size="mini" :disabled="!connections.length" @click="activeView = 'nodes'">节点状态</el-button>
                     </div>
                 </el-card>
-                <el-alert
-                        v-if="!connections.length"
-                        type="info"
-                        :closable="false"
-                        class="bottom-space"
-                        title="快速开始：先进入“连接管理”连接一个节点（例如 127.0.0.1:2379），再回到“数据浏览”执行 Put/Get 验证。">
-                </el-alert>
-                <el-alert
-                        v-else-if="!hasCurrentConnection"
-                        type="warning"
-                        :closable="false"
-                        class="bottom-space"
-                        title="你已连接节点，但还没有选中当前操作连接。请先在左侧“当前操作连接”下拉框选择 host:port。">
-                </el-alert>
                 <section v-show="activeView === 'browser'" class="browser-page">
                     <el-row :gutter="12" class="full-height-row">
                         <el-col :span="8" class="full-height-col">
@@ -150,14 +157,14 @@
                                         <el-descriptions-item label="version">{{ safeValue(selectedKv.version) }}</el-descriptions-item>
                                         <el-descriptions-item label="leaseId">{{ safeValue(selectedKv.leaseId) }}</el-descriptions-item>
                                     </el-descriptions>
-                                    <el-tabs v-model="valueViewMode" class="detail-tabs">
-                                        <el-tab-pane label="Text" name="text">
-                                            <pre class="code-box">{{ formattedSelectedValue }}</pre>
+                                    <el-tabs class="detail-tabs">
+                                        <el-tab-pane label="Value" name="value">
+                                            <div class="bottom-space">
+                                                <el-tag size="mini" :type="selectedKvValueFormat === 'JSON' ? 'success' : 'info'">{{ selectedKvValueFormat }}</el-tag>
+                                            </div>
+                                            <pre class="code-box">{{ selectedKvValueDisplay }}</pre>
                                         </el-tab-pane>
-                                        <el-tab-pane label="JSON" name="json">
-                                            <pre class="code-box">{{ formattedSelectedValue }}</pre>
-                                        </el-tab-pane>
-                                        <el-tab-pane label="Raw JSON" name="raw">
+                                        <el-tab-pane label="原始响应" name="raw">
                                             <pre class="code-box">{{ prettyResult }}</pre>
                                         </el-tab-pane>
                                     </el-tabs>
@@ -188,6 +195,12 @@
                                 <el-row :gutter="16">
                                     <el-col :span="10">
                                         <el-form label-position="top" size="small">
+                                            <el-alert
+                                                    type="info"
+                                                    :closable="false"
+                                                    class="bottom-space"
+                                                    title="Key 与 Lease 的关联发生在 KV Put：填写 LeaseId 后执行 Put，就会把当前 Key 绑定到该 Lease。">
+                                            </el-alert>
                                             <el-form-item label="Key / Prefix（必填）">
                                                 <el-input v-model.trim="kvForm.key" placeholder="Key 示例：/config/app/name；Prefix 示例：/config/ 或 1" clearable autocomplete="off"></el-input>
                                             </el-form-item>
@@ -195,8 +208,12 @@
                                                 <el-input type="textarea" :rows="8" v-model="kvForm.value" placeholder="请输入 value" autocomplete="off"></el-input>
                                             </el-form-item>
                                             <el-form-item label="LeaseId（可选）">
-                                                <el-input v-model.number="kvForm.leaseId" placeholder="例如 1001" clearable autocomplete="off"></el-input>
+                                                <el-input v-model.number="kvForm.leaseId" placeholder="例如 1001" clearable autocomplete="off" @focus="selectInputContents"></el-input>
                                             </el-form-item>
+                                            <div class="bottom-space">
+                                                <el-button size="mini" plain :disabled="!hasPositiveLeaseId()" @click="kvUseCurrentLeaseId">使用 Lease 页当前 LeaseId</el-button>
+                                                <el-tag v-if="hasPositiveLeaseId()" size="mini" class="inline-left-gap">当前 Lease 上下文：{{ leaseForm.leaseId }}</el-tag>
+                                            </div>
                                             <el-tooltip :disabled="!actionDisabledReason('kv.put')" :content="actionDisabledReason('kv.put')" placement="top">
                                                 <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('kv.put')" @click="putKv">Put</el-button></span>
                                             </el-tooltip>
@@ -219,6 +236,170 @@
                                     </el-col>
                                 </el-row>
                             </el-tab-pane>
+                            <el-tab-pane label="Txn 事务" name="txn">
+                                <el-row :gutter="16">
+                                    <el-col :span="11">
+                                        <el-alert
+                                                type="info"
+                                                :closable="false"
+                                                class="bottom-space"
+                                                title="按顺序操作：1 填 Compare 条件；2 配置 Then / Else 分支；3 执行 Txn；4 在右侧查看命中了哪条分支。">
+                                        </el-alert>
+                                        <el-form label-position="top" size="small">
+                                            <el-card shadow="never" class="module-card txn-card-stack">
+                                                <div slot="header" class="card-header">
+                                                    <div>
+                                                        <div class="card-title">1. Compare 条件</div>
+                                                        <div class="card-desc">先决定“事务判断什么条件成立”</div>
+                                                    </div>
+                                                    <el-button size="mini" plain :disabled="!selectedKv" @click="txnUseSelectedKvAsCompareKey">使用当前选中 Key</el-button>
+                                                </div>
+                                                <el-form-item label="Compare Key（必填）">
+                                                    <el-input v-model.trim="txnForm.compareKey" placeholder="例如 /txn/demo" clearable autocomplete="off"></el-input>
+                                                </el-form-item>
+                                                <el-form-item label="Compare 字段">
+                                                    <el-select v-model="txnForm.compareFieldType" style="width: 100%">
+                                                        <el-option label="VALUE" value="VALUE"></el-option>
+                                                        <el-option label="VERSION" value="VERSION"></el-option>
+                                                        <el-option label="CREATE_REVISION" value="CREATE_REVISION"></el-option>
+                                                        <el-option label="MOD_REVISION" value="MOD_REVISION"></el-option>
+                                                    </el-select>
+                                                </el-form-item>
+                                                <el-form-item label="Compare 运算符">
+                                                    <el-select v-model="txnForm.compareOperatorType" style="width: 100%">
+                                                        <el-option label="EQUAL" value="EQUAL"></el-option>
+                                                        <el-option label="NOT_EQUAL" value="NOT_EQUAL"></el-option>
+                                                        <el-option label="GREATER" value="GREATER"></el-option>
+                                                        <el-option label="LESS" value="LESS"></el-option>
+                                                    </el-select>
+                                                </el-form-item>
+                                                <el-form-item v-if="txnForm.compareFieldType === 'VALUE'" label="Compare Value">
+                                                    <el-input v-model="txnForm.compareValue" placeholder="字符串比较值" clearable autocomplete="off"></el-input>
+                                                </el-form-item>
+                                                <el-form-item v-else label="Compare 数值">
+                                                    <el-input v-model.number="txnForm.compareLongValue" placeholder="大于等于 0" clearable autocomplete="off" @focus="selectInputContents"></el-input>
+                                                </el-form-item>
+                                            </el-card>
+
+                                            <el-card shadow="never" class="module-card txn-card-stack top-space">
+                                                <div slot="header" class="card-header">
+                                                    <div>
+                                                        <div class="card-title">2. Then 分支</div>
+                                                        <div class="card-desc">Compare=true 时执行</div>
+                                                    </div>
+                                                    <div class="txn-inline-actions">
+                                                        <el-button size="mini" plain :disabled="!selectedKv" @click="txnUseSelectedKvAsBranchKey('success')">使用当前选中 Key</el-button>
+                                                        <el-button size="mini" plain :disabled="!hasPositiveLeaseId()" @click="txnUseCurrentLeaseIdInBranch('success')">使用当前 LeaseId</el-button>
+                                                    </div>
+                                                </div>
+                                                <el-form-item label="Then 操作">
+                                                    <el-select v-model="txnForm.successOperationType" style="width: 100%">
+                                                        <el-option label="PUT" value="PUT"></el-option>
+                                                        <el-option label="DELETE" value="DELETE"></el-option>
+                                                        <el-option label="GET" value="GET"></el-option>
+                                                        <el-option label="RANGE" value="RANGE"></el-option>
+                                                        <el-option label="DELETE_RANGE" value="DELETE_RANGE"></el-option>
+                                                    </el-select>
+                                                </el-form-item>
+                                                <el-form-item label="Then Key / StartKey（必填）">
+                                                    <el-input v-model.trim="txnForm.successKey" placeholder="例如 /txn/then" clearable autocomplete="off"></el-input>
+                                                </el-form-item>
+                                                <el-form-item v-if="txnOperationNeedsValue(txnForm.successOperationType)" label="Then Value">
+                                                    <el-input v-model="txnForm.successValue" placeholder="PUT value" clearable autocomplete="off"></el-input>
+                                                </el-form-item>
+                                                <el-form-item v-if="txnOperationNeedsValue(txnForm.successOperationType)" label="Then LeaseId（可选）">
+                                                    <el-input v-model.number="txnForm.successLeaseId" placeholder="例如 1001" clearable autocomplete="off" @focus="selectInputContents"></el-input>
+                                                </el-form-item>
+                                                <el-form-item v-if="txnOperationSupportsPrefix(txnForm.successOperationType)">
+                                                    <el-switch v-model="txnForm.successPrefixMatch" active-text="Then Prefix 模式"></el-switch>
+                                                </el-form-item>
+                                            </el-card>
+
+                                            <el-card shadow="never" class="module-card top-space">
+                                                <div slot="header" class="card-header">
+                                                    <div>
+                                                        <div class="card-title">3. Else 分支</div>
+                                                        <div class="card-desc">Compare=false 时执行</div>
+                                                    </div>
+                                                    <div class="txn-inline-actions">
+                                                        <el-button size="mini" plain :disabled="!selectedKv" @click="txnUseSelectedKvAsBranchKey('failure')">使用当前选中 Key</el-button>
+                                                        <el-button size="mini" plain :disabled="!hasPositiveLeaseId()" @click="txnUseCurrentLeaseIdInBranch('failure')">使用当前 LeaseId</el-button>
+                                                    </div>
+                                                </div>
+                                                <el-form-item label="Else 操作">
+                                                    <el-select v-model="txnForm.failureOperationType" style="width: 100%">
+                                                        <el-option label="PUT" value="PUT"></el-option>
+                                                        <el-option label="DELETE" value="DELETE"></el-option>
+                                                        <el-option label="GET" value="GET"></el-option>
+                                                        <el-option label="RANGE" value="RANGE"></el-option>
+                                                        <el-option label="DELETE_RANGE" value="DELETE_RANGE"></el-option>
+                                                    </el-select>
+                                                </el-form-item>
+                                                <el-form-item label="Else Key / StartKey（必填）">
+                                                    <el-input v-model.trim="txnForm.failureKey" placeholder="例如 /txn/else" clearable autocomplete="off"></el-input>
+                                                </el-form-item>
+                                                <el-form-item v-if="txnOperationNeedsValue(txnForm.failureOperationType)" label="Else Value">
+                                                    <el-input v-model="txnForm.failureValue" placeholder="PUT value" clearable autocomplete="off"></el-input>
+                                                </el-form-item>
+                                                <el-form-item v-if="txnOperationNeedsValue(txnForm.failureOperationType)" label="Else LeaseId（可选）">
+                                                    <el-input v-model.number="txnForm.failureLeaseId" placeholder="例如 1002" clearable autocomplete="off" @focus="selectInputContents"></el-input>
+                                                </el-form-item>
+                                                <el-form-item v-if="txnOperationSupportsPrefix(txnForm.failureOperationType)">
+                                                    <el-switch v-model="txnForm.failurePrefixMatch" active-text="Else Prefix 模式"></el-switch>
+                                                </el-form-item>
+                                            </el-card>
+
+                                            <div class="top-space">
+                                                <el-tooltip :disabled="!actionDisabledReason('txn.execute')" :content="actionDisabledReason('txn.execute')" placement="top">
+                                                    <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('txn.execute')" @click="txnExecute">执行 Txn</el-button></span>
+                                                </el-tooltip>
+                                            </div>
+                                        </el-form>
+                                    </el-col>
+                                    <el-col :span="13">
+                                        <el-card shadow="never" class="module-card">
+                                            <div slot="header" class="card-header">
+                                                <div>
+                                                    <div class="card-title">Txn 预览与结果</div>
+                                                    <div class="card-desc">左侧负责配置；右侧负责告诉你“条件是什么、命中了哪边、实际返回了什么”</div>
+                                                </div>
+                                            </div>
+                                            <div class="txn-preview-grid">
+                                                <el-alert type="info" :closable="false" :title="'Compare：' + txnReadableCompare"></el-alert>
+                                                <el-alert type="success" :closable="false" :title="'Then：' + txnReadableSuccessBranch"></el-alert>
+                                                <el-alert type="warning" :closable="false" :title="'Else：' + txnReadableFailureBranch"></el-alert>
+                                            </div>
+                                            <el-divider content-position="left">执行结果</el-divider>
+                                            <el-empty v-if="!txnOperationSummary" description="还没有执行 Txn" :image-size="56"></el-empty>
+                                            <div v-else>
+                                                <el-descriptions :column="2" size="small" border>
+                                                    <el-descriptions-item label="状态">
+                                                        <el-tag :type="txnOperationSummary.success ? 'success' : 'danger'">{{ txnOperationSummary.success ? '成功' : '失败' }}</el-tag>
+                                                    </el-descriptions-item>
+                                                    <el-descriptions-item label="消息">{{ txnOperationSummary.message || '-' }}</el-descriptions-item>
+                                                    <el-descriptions-item label="命中分支">{{ txnResultBranchLabel }}</el-descriptions-item>
+                                                    <el-descriptions-item label="Txn Revision">{{ txnResultRevision }}</el-descriptions-item>
+                                                </el-descriptions>
+                                                <div class="lease-inline-title top-space">分支内实际返回</div>
+                                                <el-table :data="txnResultResponses" size="mini" border empty-text="本次 Txn 没有分支返回数据">
+                                                    <el-table-column prop="operationType" label="操作类型" width="120">
+                                                        <template slot-scope="scope">
+                                                            <el-tag size="mini">{{ txnOperationTypeLabel(scope.row.operationType) }}</el-tag>
+                                                        </template>
+                                                    </el-table-column>
+                                                    <el-table-column label="结果摘要">
+                                                        <template slot-scope="scope">
+                                                            <span class="mono break-word">{{ txnResponseDataSummary(scope.row) }}</span>
+                                                        </template>
+                                                    </el-table-column>
+                                                </el-table>
+                                                <div class="lease-inline-title top-space">原始响应</div>
+                                                <pre class="code-box small-code">{{ JSON.stringify(txnOperationResult, null, 2) }}</pre>
+                                            </div>
+                                        </el-card>
+                                    </el-col>
+                                </el-row>
+                            </el-tab-pane>
                             <el-tab-pane label="Watch 监听" name="watch">
                                 <el-row :gutter="16">
                                     <el-col :span="9">
@@ -233,76 +414,312 @@
                                                 <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('watch.start')" @click="watchStart">开始监听</el-button></span>
                                             </el-tooltip>
                                         </el-form>
-                                        <el-divider content-position="left">活跃监听</el-divider>
-                                        <el-table :data="watchSessions" size="mini" border empty-text="暂无监听会话">
-                                            <el-table-column label="连接" width="150">
-                                                <template slot-scope="scope">{{ watchSessionEndpoint(scope.row) }}</template>
-                                            </el-table-column>
-                                            <el-table-column prop="key" label="Key"></el-table-column>
-                                            <el-table-column label="操作" width="80">
-                                                <template slot-scope="scope">
-                                                    <el-button type="text" size="mini" @click="watchCancelById(scope.row.watchId)">取消</el-button>
-                                                </template>
-                                            </el-table-column>
-                                        </el-table>
+                                        <el-divider content-position="left">Watch 会话</el-divider>
+                                        <el-empty v-if="!watchSessionListSorted.length" description="暂无 Watch 会话" :image-size="56"></el-empty>
+                                        <div v-else class="watch-session-list">
+                                            <div v-for="watchSession in watchSessionListSorted"
+                                                 :key="watchSession.watchId"
+                                                 class="watch-session-item"
+                                                 :class="{selected: String(watchSession.watchId) === String(selectedWatchId)}"
+                                                 @click="watchSelectById(watchSession.watchId)">
+                                                <div class="watch-session-item-header">
+                                                    <span class="mono">#{{ watchSession.watchId }}</span>
+                                                    <el-tag size="mini" :type="watchSessionTagType(watchSession)">
+                                                        {{ watchSession.active ? 'active' : 'closed' }}
+                                                    </el-tag>
+                                                </div>
+                                                <div class="watch-session-item-meta">{{ watchSessionEndpoint(watchSession) }}</div>
+                                                <div class="watch-session-item-meta">{{ watchSession.prefix ? 'prefix' : 'key' }}: {{ watchSession.key }}</div>
+                                                <div class="watch-session-item-footer">
+                                                    <span>事件 {{ watchSessionEventCount(watchSession.watchId) }}</span>
+                                                    <el-button type="text" size="mini" @click.stop="watchCancelById(watchSession.watchId)">取消</el-button>
+                                                </div>
+                                            </div>
+                                        </div>
                                     </el-col>
                                     <el-col :span="15">
                                         <div class="watch-event-toolbar">
-                                            <el-switch v-model="watchEventOnlyCurrentConnection" active-text="仅看当前连接" inactive-text="全部连接"></el-switch>
+                                            <el-switch v-model="showAllWatchEvents" active-text="聚合全部会话" inactive-text="仅看当前会话"></el-switch>
                                             <el-button size="mini" @click="webSocketClearWatchEvents">清空事件</el-button>
                                         </div>
-                                        <pre class="event-box">{{ watchEventsText }}</pre>
+                                        <el-empty v-if="!selectedWatchId && !showAllWatchEvents" description="请先从左侧选择一个 watch 会话" :image-size="56"></el-empty>
+                                        <pre v-else class="event-box">{{ showAllWatchEvents ? allWatchEventsText : selectedWatchEventsText }}</pre>
                                     </el-col>
                                 </el-row>
                             </el-tab-pane>
                             <el-tab-pane label="Lease 管理" name="lease">
-                                <el-row :gutter="16">
-                                    <el-col :span="10">
-                                        <el-form label-position="top" size="small">
-                                            <el-form-item label="LeaseId">
-                                                <el-input v-model.number="leaseForm.leaseId"></el-input>
-                                            </el-form-item>
-                                            <el-form-item label="TTL 秒">
-                                                <el-input v-model.number="leaseForm.ttlSeconds"></el-input>
-                                            </el-form-item>
-                                            <el-tooltip :disabled="!actionDisabledReason('lease.grant')" :content="actionDisabledReason('lease.grant')" placement="top">
-                                                <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('lease.grant')" @click="grantLease">Grant</el-button></span>
-                                            </el-tooltip>
-                                            <el-tooltip :disabled="!actionDisabledReason('lease.ttl')" :content="actionDisabledReason('lease.ttl')" placement="top">
-                                                <span class="tooltip-button-wrap"><el-button :disabled="!!actionDisabledReason('lease.ttl')" @click="ttlLease">TTL</el-button></span>
-                                            </el-tooltip>
-                                            <el-tooltip :disabled="!actionDisabledReason('lease.list')" :content="actionDisabledReason('lease.list')" placement="top">
-                                                <span class="tooltip-button-wrap"><el-button :disabled="!!actionDisabledReason('lease.list')" @click="listLease">List</el-button></span>
-                                            </el-tooltip>
-                                            <el-tooltip :disabled="!actionDisabledReason('lease.revoke')" :content="actionDisabledReason('lease.revoke')" placement="top">
-                                                <span class="tooltip-button-wrap"><el-button type="danger" :disabled="!!actionDisabledReason('lease.revoke')" @click="confirmRevokeLease">Revoke</el-button></span>
-                                            </el-tooltip>
-                                        </el-form>
-                                    </el-col>
-                                    <el-col :span="14">
-                                        <result-panel :summary="resultSummary" :raw="prettyResult"></result-panel>
-                                    </el-col>
-                                </el-row>
+                                <el-tabs v-model="leaseInnerTab" type="border-card">
+                                    <el-tab-pane label="普通 Lease" name="plain">
+                                        <el-row :gutter="16">
+                                            <el-col :span="10">
+                                                <el-card shadow="never" class="module-card lease-card-stack">
+                                                    <div slot="header" class="card-header">
+                                                        <div>
+                                                            <div class="card-title">Lease RPC 操作</div>
+                                                            <div class="card-desc">这里只处理租约本身：grant / ttl / list / revoke，不直接执行 Key 绑定</div>
+                                                        </div>
+                                                    </div>
+                                                    <el-form label-position="top" size="small">
+                                                        <el-form-item label="LeaseId">
+                                                            <el-input v-model.number="leaseForm.leaseId" placeholder="为空时由服务端自动分配" @focus="selectInputContents"></el-input>
+                                                        </el-form-item>
+                                                        <el-form-item label="TTL 秒">
+                                                            <el-input v-model.number="leaseForm.ttlSeconds" placeholder="留空默认 10 秒" @focus="selectInputContents"></el-input>
+                                                        </el-form-item>
+                                                        <div class="lease-action-group">
+                                                            <el-tooltip :disabled="!actionDisabledReason('lease.grant')" :content="actionDisabledReason('lease.grant')" placement="top">
+                                                                <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('lease.grant')" @click="grantLease">Grant</el-button></span>
+                                                            </el-tooltip>
+                                                            <el-tooltip :disabled="!actionDisabledReason('lease.ttl')" :content="actionDisabledReason('lease.ttl')" placement="top">
+                                                                <span class="tooltip-button-wrap"><el-button :disabled="!!actionDisabledReason('lease.ttl')" @click="ttlLease">TTL</el-button></span>
+                                                            </el-tooltip>
+                                                            <el-tooltip :disabled="!actionDisabledReason('lease.list')" :content="actionDisabledReason('lease.list')" placement="top">
+                                                                <span class="tooltip-button-wrap"><el-button :disabled="!!actionDisabledReason('lease.list')" @click="listLease">List</el-button></span>
+                                                            </el-tooltip>
+                                                            <el-tooltip :disabled="!actionDisabledReason('lease.revoke')" :content="actionDisabledReason('lease.revoke')" placement="top">
+                                                                <span class="tooltip-button-wrap"><el-button type="danger" :disabled="!!actionDisabledReason('lease.revoke')" @click="confirmRevokeLease">Revoke</el-button></span>
+                                                            </el-tooltip>
+                                                        </div>
+                                                        <el-alert
+                                                                class="top-space"
+                                                                type="info"
+                                                                :closable="false"
+                                                                title="Lease 与 Key 的关联不发生在这里。要把 Key 绑定到 Lease，请切到 KV 操作，填写 LeaseId 后执行 Put。">
+                                                        </el-alert>
+                                                        <div class="top-space">
+                                                            <el-button size="mini" plain :disabled="!hasPositiveLeaseId()" @click="leaseGoToKvBinding()">去 KV 绑定 Key</el-button>
+                                                        </div>
+                                                    </el-form>
+                                                </el-card>
+                                            </el-col>
+                                            <el-col :span="14">
+                                                <el-card shadow="never" class="module-card lease-card-stack">
+                                                    <div slot="header" class="card-header">
+                                                        <div>
+                                                            <div class="card-title">普通 Lease 响应</div>
+                                                            <div class="card-desc">单独展示 grant / ttl / list / revoke 返回，不与 LeaseHandle 状态混杂</div>
+                                                        </div>
+                                                    </div>
+                                                    <el-empty v-if="!leaseOperationSummary" description="还没有执行普通 Lease 操作" :image-size="56"></el-empty>
+                                                    <div v-else class="lease-result-panel">
+                                                        <el-descriptions :column="2" size="small" border>
+                                                            <el-descriptions-item label="状态">
+                                                                <el-tag :type="leaseOperationSummary.success ? 'success' : 'danger'">{{ leaseOperationSummary.success ? '成功' : '失败' }}</el-tag>
+                                                            </el-descriptions-item>
+                                                            <el-descriptions-item label="操作">{{ leaseOperationSummary.type }}</el-descriptions-item>
+                                                            <el-descriptions-item label="目标"><span class="break-word">{{ leaseOperationSummary.target || '-' }}</span></el-descriptions-item>
+                                                            <el-descriptions-item label="提示"><span class="break-word">{{ leaseOperationSummary.message || '-' }}</span></el-descriptions-item>
+                                                        </el-descriptions>
+
+                                                        <el-descriptions v-if="leaseOperationType === 'LEASE_REVOKE' && leaseOperationResult && leaseOperationResult.data" class="top-space" :column="3" size="small" border>
+                                                            <el-descriptions-item label="leaseId">{{ leaseOperationResult.data.leaseId }}</el-descriptions-item>
+                                                            <el-descriptions-item label="deletedCount">{{ leaseOperationResult.data.deletedCount }}</el-descriptions-item>
+                                                            <el-descriptions-item label="revision">{{ leaseOperationResult.data.revision }}</el-descriptions-item>
+                                                        </el-descriptions>
+
+                                                        <div v-if="leaseOperationLeaseList.length" class="top-space">
+                                                            <div class="lease-inline-title">Lease 结果明细</div>
+                                                            <el-table :data="leaseOperationLeaseList" size="mini" border>
+                                                                <el-table-column prop="leaseId" label="leaseId" width="110"></el-table-column>
+                                                                <el-table-column prop="ttlSeconds" label="ttl" width="80"></el-table-column>
+                                                                <el-table-column prop="remainingSeconds" label="remaining" width="100"></el-table-column>
+                                                                <el-table-column label="keys" width="80">
+                                                                    <template slot-scope="scope">{{ (scope.row.keys || []).length }}</template>
+                                                                </el-table-column>
+                                                                <el-table-column label="操作" width="220">
+                                                                    <template slot-scope="scope">
+                                                                        <el-button type="text" size="mini" @click="leaseUseLeaseView(scope.row)">带入表单</el-button>
+                                                                        <el-button type="text" size="mini" @click="leaseGoToKvBinding(scope.row)">去 KV 绑定</el-button>
+                                                                        <el-button type="text" size="mini" @click="leaseCopyKeys(scope.row.keys || [])" :disabled="!(scope.row.keys || []).length">复制 Keys</el-button>
+                                                                    </template>
+                                                                </el-table-column>
+                                                            </el-table>
+                                                            <el-descriptions v-if="leaseOperationPrimaryLease" class="top-space" :column="2" size="small" border>
+                                                                <el-descriptions-item label="当前 LeaseId">{{ leaseOperationPrimaryLease.leaseId }}</el-descriptions-item>
+                                                                <el-descriptions-item label="Key 数">{{ (leaseOperationPrimaryLease.keys || []).length }}</el-descriptions-item>
+                                                                <el-descriptions-item label="关联 Keys" :span="2">
+                                                                    <span class="break-word">{{ (leaseOperationPrimaryLease.keys || []).join(', ') || '-' }}</span>
+                                                                </el-descriptions-item>
+                                                            </el-descriptions>
+                                                        </div>
+
+                                                        <el-collapse class="top-space">
+                                                            <el-collapse-item title="查看本次 Lease 原始响应 JSON" name="lease-raw">
+                                                                <pre class="code-box small-code">{{ JSON.stringify(leaseOperationResult, null, 2) }}</pre>
+                                                            </el-collapse-item>
+                                                        </el-collapse>
+                                                    </div>
+                                                </el-card>
+                                            </el-col>
+                                        </el-row>
+                                    </el-tab-pane>
+                                    <el-tab-pane label="LeaseHandle 会话" name="session">
+                                        <el-row :gutter="16">
+                                            <el-col :span="9">
+                                                <el-card shadow="never" class="module-card">
+                                                    <div slot="header" class="card-header">
+                                                        <div>
+                                                            <div class="card-title">托管会话入口</div>
+                                                            <div class="card-desc">LeaseHandle 负责自动续约，会话状态与普通 Lease 结果分开维护</div>
+                                                        </div>
+                                                    </div>
+                                                    <el-form label-position="top" size="small">
+                                                        <el-form-item label="LeaseId">
+                                                            <el-input v-model.number="leaseForm.leaseId" placeholder="接管已有 Lease 时必填" @focus="selectInputContents"></el-input>
+                                                        </el-form-item>
+                                                        <el-form-item label="TTL 秒">
+                                                            <el-input v-model.number="leaseForm.ttlSeconds" placeholder="留空默认 10 秒" @focus="selectInputContents"></el-input>
+                                                        </el-form-item>
+                                                        <div class="lease-action-group">
+                                                            <el-tooltip :disabled="!actionDisabledReason('lease.ttl')" :content="actionDisabledReason('lease.ttl')" placement="top">
+                                                                <span class="tooltip-button-wrap"><el-button type="primary" plain :disabled="!!actionDisabledReason('lease.ttl')" @click="leaseSessionStart">Start KeepAlive</el-button></span>
+                                                            </el-tooltip>
+                                                            <el-tooltip :disabled="!actionDisabledReason('lease.grant')" :content="actionDisabledReason('lease.grant')" placement="top">
+                                                                <span class="tooltip-button-wrap"><el-button type="primary" plain :disabled="!!actionDisabledReason('lease.grant')" @click="leaseSessionGrantAndStart">Grant+Start</el-button></span>
+                                                            </el-tooltip>
+                                                        </div>
+                                                    </el-form>
+                                                    <el-divider content-position="left">会话列表</el-divider>
+                                                    <el-button size="mini" class="bottom-space" @click="leaseLoadSessions">刷新会话</el-button>
+                                                    <el-empty v-if="!leaseSessionListSorted.length" description="暂无 LeaseHandle 会话" :image-size="56"></el-empty>
+                                                    <div v-else class="lease-session-list">
+                                                        <div v-for="leaseSession in leaseSessionListSorted"
+                                                             :key="leaseSession.leaseId"
+                                                             class="lease-session-item"
+                                                             :class="{selected: Number(leaseSession.leaseId) === Number(selectedLeaseSessionId)}"
+                                                             @click="leaseUseSession(leaseSession)">
+                                                            <div class="lease-session-item-header">
+                                                                <span class="mono">#{{ leaseSession.leaseId }}</span>
+                                                                <el-tag size="mini" :type="leaseSessionTagType(leaseSession)">
+                                                                    {{ leaseSession.active ? 'active' : 'closed' }}
+                                                                </el-tag>
+                                                            </div>
+                                                            <div class="lease-session-item-meta">ttl={{ leaseSession.ttlSeconds }}s, remaining={{ leaseSession.remainingSeconds }}s</div>
+                                                            <div class="lease-session-item-meta">keys={{ (leaseSession.keys || []).length }}</div>
+                                                            <div class="lease-session-item-footer">
+                                                                <span>事件 {{ leaseSessionEventCount(leaseSession.leaseId) }}</span>
+                                                                <span>
+                                                                    <el-button type="text" size="mini" @click.stop="leaseGoToKvBinding(leaseSession)">去 KV 绑定</el-button>
+                                                                    <el-button type="text" size="mini" @click.stop="leaseSessionStop(leaseSession.leaseId)">Stop</el-button>
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </el-card>
+                                            </el-col>
+                                            <el-col :span="15">
+                                                <el-card shadow="never" class="module-card">
+                                                    <div slot="header" class="card-header">
+                                                        <div>
+                                                            <div class="card-title">会话详情</div>
+                                                            <div class="card-desc">像 Watch 一样先选会话，再看当前状态、关联 Keys 和状态流</div>
+                                                        </div>
+                                                    </div>
+                                                    <el-empty v-if="!selectedLeaseSession" description="请先在左侧选择一个 LeaseHandle 会话" :image-size="56"></el-empty>
+                                                    <div v-else>
+                                                        <el-descriptions :column="2" size="small" border>
+                                                            <el-descriptions-item label="leaseId">{{ selectedLeaseSession.leaseId }}</el-descriptions-item>
+                                                            <el-descriptions-item label="状态">
+                                                                <el-tag size="mini" :type="selectedLeaseSession.active ? 'success' : 'info'">{{ selectedLeaseSession.active ? 'active' : 'closed' }}</el-tag>
+                                                            </el-descriptions-item>
+                                                            <el-descriptions-item label="ttlSeconds">{{ selectedLeaseSession.ttlSeconds }}</el-descriptions-item>
+                                                            <el-descriptions-item label="remainingSeconds">{{ selectedLeaseSession.remainingSeconds }}</el-descriptions-item>
+                                                            <el-descriptions-item label="关联 Keys" :span="2">
+                                                                <span class="break-word">{{ (selectedLeaseSession.keys || []).join(', ') || '-' }}</span>
+                                                            </el-descriptions-item>
+                                                        </el-descriptions>
+                                                        <div class="top-space">
+                                                            <el-button size="mini" plain @click="leaseUseLeaseView(selectedLeaseSession)">带入普通 Lease 表单</el-button>
+                                                            <el-button size="mini" plain @click="leaseGoToKvBinding(selectedLeaseSession)">去 KV 绑定 Key</el-button>
+                                                            <el-button size="mini" plain :disabled="!(selectedLeaseSession.keys || []).length" @click="leaseCopyKeys(selectedLeaseSession.keys || [])">复制 Keys</el-button>
+                                                        </div>
+                                                        <el-divider content-position="left">会话状态流</el-divider>
+                                                        <pre class="event-box">{{ selectedLeaseSessionEventsText }}</pre>
+                                                    </div>
+                                                </el-card>
+                                            </el-col>
+                                        </el-row>
+                                    </el-tab-pane>
+                                </el-tabs>
                             </el-tab-pane>
                             <el-tab-pane label="Compact / 一致性" name="compact">
-                                <el-alert type="warning" :closable="false" title="Compact 会压缩指定 revision 之前的历史版本，可能影响历史查询和 Watch 行为。"></el-alert>
-                                <el-form inline size="small" class="top-space">
-                                    <el-form-item label="Prefix（必填）">
-                                        <el-input v-model.trim="comparePrefixValue" placeholder="用于多节点 Prefix 对比，例如 /config/ 或 1" clearable autocomplete="off"></el-input>
-                                    </el-form-item>
-                                    <el-tooltip :disabled="!actionDisabledReason('compact.comparePrefix')" :content="actionDisabledReason('compact.comparePrefix')" placement="top">
-                                        <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('compact.comparePrefix')" @click="comparePrefix">多节点 Prefix 对比</el-button></span>
-                                    </el-tooltip>
-                                </el-form>
-                                <el-form inline size="small">
-                                    <el-form-item label="Revision">
-                                        <el-input v-model.number="compactRevision" placeholder="大于 0"></el-input>
-                                    </el-form-item>
-                                    <el-tooltip :disabled="!actionDisabledReason('compact.execute')" :content="actionDisabledReason('compact.execute')" placement="top">
-                                        <span class="tooltip-button-wrap"><el-button type="danger" :disabled="!!actionDisabledReason('compact.execute')" @click="confirmCompact">Compact</el-button></span>
-                                    </el-tooltip>
-                                </el-form>
-                                <result-panel :summary="resultSummary" :raw="prettyResult"></result-panel>
+                                <el-row :gutter="16">
+                                    <el-col :span="10">
+                                        <el-card shadow="never" class="module-card">
+                                            <div slot="header" class="card-header">
+                                                <div>
+                                                    <div class="card-title">Compact / 一致性操作</div>
+                                                    <div class="card-desc">先做 Prefix 对比确认多节点是否一致，再决定是否执行 Compact</div>
+                                                </div>
+                                            </div>
+                                            <el-alert type="warning" :closable="false" title="Compact 会压缩指定 revision 之前的历史版本，可能影响历史查询和 Watch 行为。"></el-alert>
+                                            <el-form label-position="top" size="small" class="top-space">
+                                                <el-form-item label="1. Prefix 对比（必填）">
+                                                    <el-input v-model.trim="comparePrefixValue" placeholder="例如 /config/ 或 1" clearable autocomplete="off"></el-input>
+                                                </el-form-item>
+                                                <el-tooltip :disabled="!actionDisabledReason('compact.comparePrefix')" :content="actionDisabledReason('compact.comparePrefix')" placement="top">
+                                                    <span class="tooltip-button-wrap"><el-button type="primary" :disabled="!!actionDisabledReason('compact.comparePrefix')" @click="comparePrefix">多节点 Prefix 对比</el-button></span>
+                                                </el-tooltip>
+                                                <el-form-item label="2. Compact Revision" class="top-space">
+                                                    <el-input v-model.number="compactRevision" placeholder="大于 0" @focus="selectInputContents"></el-input>
+                                                </el-form-item>
+                                                <el-tooltip :disabled="!actionDisabledReason('compact.execute')" :content="actionDisabledReason('compact.execute')" placement="top">
+                                                    <span class="tooltip-button-wrap"><el-button type="danger" :disabled="!!actionDisabledReason('compact.execute')" @click="confirmCompact">Compact</el-button></span>
+                                                </el-tooltip>
+                                            </el-form>
+                                        </el-card>
+                                    </el-col>
+                                    <el-col :span="14">
+                                        <el-card shadow="never" class="module-card">
+                                            <div slot="header" class="card-header">
+                                                <div>
+                                                    <div class="card-title">Compact 结果</div>
+                                                    <div class="card-desc">把 Compact 执行结果翻译成人话，避免只看 revision 数字</div>
+                                                </div>
+                                            </div>
+                                            <el-empty v-if="!compactOperationSummary" description="还没有执行 Compact" :image-size="56"></el-empty>
+                                            <div v-else>
+                                                <el-descriptions :column="2" size="small" border>
+                                                    <el-descriptions-item label="状态">
+                                                        <el-tag :type="compactOperationSummary.success ? 'success' : 'danger'">{{ compactOperationSummary.success ? '成功' : '失败' }}</el-tag>
+                                                    </el-descriptions-item>
+                                                    <el-descriptions-item label="消息">{{ compactOperationSummary.message || '-' }}</el-descriptions-item>
+                                                    <el-descriptions-item label="目标 Revision">{{ compactOperationSummary.target || '-' }}</el-descriptions-item>
+                                                    <el-descriptions-item label="说明">{{ compactFriendlyMessage }}</el-descriptions-item>
+                                                </el-descriptions>
+                                                <el-descriptions v-if="compactResultData" class="top-space" :column="2" size="small" border>
+                                                    <el-descriptions-item label="compactRevision">{{ compactResultData.compactRevision }}</el-descriptions-item>
+                                                    <el-descriptions-item label="currentRevision">{{ compactResultData.currentRevision }}</el-descriptions-item>
+                                                </el-descriptions>
+                                            </div>
+                                            <el-divider content-position="left">Prefix 对比结果</el-divider>
+                                            <el-empty v-if="!comparePrefixOperationSummary" description="还没有执行多节点 Prefix 对比" :image-size="56"></el-empty>
+                                            <div v-else>
+                                                <el-descriptions :column="2" size="small" border>
+                                                    <el-descriptions-item label="状态">
+                                                        <el-tag :type="comparePrefixOperationSummary.success ? 'success' : 'danger'">{{ comparePrefixOperationSummary.success ? '成功' : '失败' }}</el-tag>
+                                                    </el-descriptions-item>
+                                                    <el-descriptions-item label="一致性">
+                                                        <el-tag :type="comparePrefixConsistencyTagType">{{ comparePrefixConsistencySummary }}</el-tag>
+                                                    </el-descriptions-item>
+                                                    <el-descriptions-item label="Prefix">{{ comparePrefixOperationSummary.target || '-' }}</el-descriptions-item>
+                                                    <el-descriptions-item label="提示">{{ comparePrefixConsistencySummary === '一致' ? '各节点这个 Prefix 下的数据一致。' : '至少有一个节点返回不同结果，建议先排查一致性再做 Compact。' }}</el-descriptions-item>
+                                                </el-descriptions>
+                                                <el-table :data="comparePrefixNodeRows" size="mini" border class="top-space">
+                                                    <el-table-column prop="endpoint" label="节点"></el-table-column>
+                                                    <el-table-column label="状态" width="90">
+                                                        <template slot-scope="scope">
+                                                            <el-tag size="mini" :type="scope.row.success ? 'success' : 'danger'">{{ scope.row.success ? '成功' : '失败' }}</el-tag>
+                                                        </template>
+                                                    </el-table-column>
+                                                    <el-table-column prop="count" label="count" width="80"></el-table-column>
+                                                    <el-table-column prop="revision" label="revision" width="100"></el-table-column>
+                                                    <el-table-column prop="message" label="message" show-overflow-tooltip></el-table-column>
+                                                </el-table>
+                                            </div>
+                                        </el-card>
+                                    </el-col>
+                                </el-row>
                             </el-tab-pane>
                         </el-tabs>
                     </el-card>
@@ -313,10 +730,11 @@
                         <div slot="header" class="card-header">
                             <div>
                                 <div class="card-title">节点状态</div>
-                                <div class="card-desc">Leader、Follower、Term、Index 与 Hash</div>
+                                <div class="card-desc">先看集群结论，再按节点展开详细指标。</div>
                             </div>
                             <el-button size="small" :disabled="!connections.length" @click="clusterLoadNodeStatus">刷新</el-button>
                         </div>
+                        <el-alert type="info" :closable="false" class="bottom-space" title="怎么看这页：先看有没有 Leader，再看 revision / hash 是否一致；如果不一致，说明节点状态还没有完全收敛或有诊断异常。"></el-alert>
                         <el-row :gutter="12" class="summary-row">
                             <el-col :span="6">
                                 <el-card shadow="never">
@@ -343,7 +761,51 @@
                                 </el-card>
                             </el-col>
                         </el-row>
+                        <el-row :gutter="12" class="summary-row top-space">
+                            <el-col :span="8">
+                                <el-card shadow="never">
+                                    <div class="metric-label">Revision 一致性</div>
+                                    <div class="metric-value">
+                                        <el-tag :type="revisionConsistencyTagType">{{ revisionConsistencySummary }}</el-tag>
+                                    </div>
+                                </el-card>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-card shadow="never">
+                                    <div class="metric-label">Hash 一致性</div>
+                                    <div class="metric-value">
+                                        <el-tag :type="hashConsistencyTagType">{{ hashConsistencySummary }}</el-tag>
+                                    </div>
+                                </el-card>
+                            </el-col>
+                            <el-col :span="8">
+                                <el-card shadow="never">
+                                    <div class="metric-label">当前节点提示</div>
+                                    <div class="metric-value node-hint-text">{{ selectedNodeDiagnosticHint }}</div>
+                                </el-card>
+                            </el-col>
+                        </el-row>
+                        <el-alert
+                                class="top-space"
+                                :type="nodeRiskCount > 0 ? 'warning' : 'success'"
+                                :closable="false"
+                                :title="nodeRiskCount > 0 ? ('当前有 ' + nodeRiskCount + ' 个节点需要关注，请优先看表格里的“风险”“revision状态”“hash状态”；需要时再展开看详细指标。') : '当前所有已探测节点的 revision / hash 看起来正常。'">
+                        </el-alert>
                         <el-table :data="connections" border size="small" empty-text="暂无连接" class="top-space">
+                            <el-table-column type="expand" width="52">
+                                <template slot-scope="scope">
+                                    <el-descriptions :column="3" size="mini" border>
+                                        <el-descriptions-item label="term">{{ nodeMetric(scope.row.nodeId, 'term') }}</el-descriptions-item>
+                                        <el-descriptions-item label="commitIndex">{{ nodeMetric(scope.row.nodeId, 'commitIndex') }}</el-descriptions-item>
+                                        <el-descriptions-item label="hash">{{ nodeMetric(scope.row.nodeId, 'hash') }}</el-descriptions-item>
+                                        <el-descriptions-item label="keyCount">{{ nodeMetric(scope.row.nodeId, 'keyCount') }}</el-descriptions-item>
+                                        <el-descriptions-item label="leaseCount">{{ nodeMetric(scope.row.nodeId, 'leaseCount') }}</el-descriptions-item>
+                                        <el-descriptions-item label="watchCount">{{ nodeMetric(scope.row.nodeId, 'watchCount') }}</el-descriptions-item>
+                                        <el-descriptions-item label="compactRevision">{{ nodeMetric(scope.row.nodeId, 'compactRevision') }}</el-descriptions-item>
+                                        <el-descriptions-item label="当前提示" :span="2">{{ nodeRiskHint(scope.row.nodeId) }}</el-descriptions-item>
+                                    </el-descriptions>
+                                </template>
+                            </el-table-column>
                             <el-table-column label="Endpoint">
                                 <template slot-scope="scope">{{ connectionEndpoint(scope.row) }}</template>
                             </el-table-column>
@@ -357,20 +819,28 @@
                                     <el-tag :type="nodeStatusMap[scope.row.nodeId] ? 'success' : 'info'">{{ nodeStatusMap[scope.row.nodeId] ? '在线' : '未知' }}</el-tag>
                                 </template>
                             </el-table-column>
-                            <el-table-column label="term">
-                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'term') }}</template>
-                            </el-table-column>
-                            <el-table-column label="commitIndex">
-                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'commitIndex') }}</template>
-                            </el-table-column>
                             <el-table-column label="revision">
                                 <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'revision') }}</template>
                             </el-table-column>
-                            <el-table-column label="keyCount">
-                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'keyCount') }}</template>
+                            <el-table-column label="revision状态" width="110">
+                                <template slot-scope="scope">
+                                    <el-tag size="mini" :type="nodeRevisionTagType(scope.row.nodeId)">{{ nodeRevisionState(scope.row.nodeId) }}</el-tag>
+                                </template>
                             </el-table-column>
-                            <el-table-column label="hash">
-                                <template slot-scope="scope">{{ nodeMetric(scope.row.nodeId, 'hash') }}</template>
+                            <el-table-column label="hash状态" width="100">
+                                <template slot-scope="scope">
+                                    <el-tag size="mini" :type="nodeHashTagType(scope.row.nodeId)">{{ nodeHashState(scope.row.nodeId) }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="风险" width="90">
+                                <template slot-scope="scope">
+                                    <el-tag size="mini" :type="nodeRiskTagType(scope.row.nodeId)">{{ nodeRiskText(scope.row.nodeId) }}</el-tag>
+                                </template>
+                            </el-table-column>
+                            <el-table-column label="风险提示" min-width="240">
+                                <template slot-scope="scope">
+                                    <span class="node-hint-text">{{ nodeRiskHint(scope.row.nodeId) }}</span>
+                                </template>
                             </el-table-column>
                         </el-table>
                     </el-card>
@@ -380,18 +850,22 @@
                     <el-row :gutter="16">
                         <el-col :span="9">
                             <el-card shadow="never" class="module-card">
-                                <div slot="header" class="card-title">连接配置</div>
-                                <el-alert type="info" :closable="false" title="连接以 Endpoint 作为唯一识别，不允许重复连接同一个 host:port。" class="bottom-space"></el-alert>
+                                <div slot="header" class="card-header">
+                                    <div>
+                                        <div class="card-title">手动连接</div>
+                                        <div class="card-desc">这里不做本地扫描。你明确填写 host 和 port，console 再通过真实网络探测节点身份。</div>
+                                    </div>
+                                </div>
+                                <el-alert type="info" :closable="false" title="手动填写实际部署的 host 和 port。连接成功后，该节点会出现在下方“已连接 Endpoint”列表；同一个 host:port 不允许重复连接。" class="bottom-space"></el-alert>
                                 <el-form label-position="top" size="small">
                                     <el-form-item label="Endpoint Host">
                                         <el-input v-model.trim="connectForm.host" placeholder="例如 127.0.0.1" clearable autocomplete="off"></el-input>
                                     </el-form-item>
                                     <el-form-item label="Endpoint Port">
-                                        <el-input v-model.number="connectForm.port" placeholder="例如 2379" clearable autocomplete="off"></el-input>
+                                        <el-input v-model.number="connectForm.port" placeholder="请输入实际监听端口" clearable autocomplete="off" @focus="selectInputContents"></el-input>
                                     </el-form-item>
                                     <el-alert v-if="normalizedConnectEndpoint" type="success" :closable="false" :title="'将连接：' + normalizedConnectEndpoint" class="bottom-space"></el-alert>
                                     <el-button type="primary" :disabled="!canConnect" @click="connectionConnectNode">连接</el-button>
-                                    <el-button @click="fillLocalCluster">填入本地节点</el-button>
                                 </el-form>
                             </el-card>
                         </el-col>
@@ -401,6 +875,11 @@
                                 <el-table :data="connections" border size="small" empty-text="暂无连接">
                                     <el-table-column label="Endpoint">
                                         <template slot-scope="scope">{{ connectionEndpoint(scope.row) }}</template>
+                                    </el-table-column>
+                                    <el-table-column label="当前操作" width="100">
+                                        <template slot-scope="scope">
+                                            <el-tag size="mini" :type="scope.row.nodeId === currentNodeId ? 'primary' : 'info'">{{ scope.row.nodeId === currentNodeId ? '当前节点' : '-' }}</el-tag>
+                                        </template>
                                     </el-table-column>
                                     <el-table-column label="状态">
                                         <template slot-scope="scope">
@@ -424,14 +903,14 @@
                         <div slot="header" class="card-header">
                             <div>
                                 <div class="card-title">操作日志</div>
-                                <div class="card-desc">记录控制台关键操作，便于回溯与复制排查</div>
+                                <div class="card-desc">默认只展示最近 50 条关键操作，用于快速回溯。</div>
                             </div>
                             <div>
                                 <el-button size="small" @click="uiCopyLogs">复制日志</el-button>
                                 <el-button size="small" type="danger" plain @click="operationLogs = []">清空</el-button>
                             </div>
                         </div>
-                        <el-table :data="operationLogs" border size="small" empty-text="暂无操作日志">
+                        <el-table :data="visibleOperationLogs" border size="small" empty-text="暂无操作日志">
                             <el-table-column prop="time" label="时间" width="170"></el-table-column>
                             <el-table-column prop="type" label="操作" width="120"></el-table-column>
                             <el-table-column prop="target" label="目标" show-overflow-tooltip></el-table-column>
@@ -471,7 +950,7 @@
                 <el-input type="textarea" :rows="10" v-model="kvEditor.value" autocomplete="off"></el-input>
             </el-form-item>
             <el-form-item label="LeaseId（可选）">
-                <el-input v-model.number="kvEditor.leaseId" clearable autocomplete="off"></el-input>
+                <el-input v-model.number="kvEditor.leaseId" clearable autocomplete="off" @focus="selectInputContents"></el-input>
             </el-form-item>
         </el-form>
         <span slot="footer"><el-button @click="kvEditor.visible = false">取消</el-button><el-button type="primary" @click="kvEditorSubmit">保存</el-button></span>
@@ -500,10 +979,10 @@
 <script src="/lib/vue/vue.min.js"></script>
 <script src="/lib/axios/axios.min.js"></script>
 <script src="/lib/element-ui/index.min.js"></script>
-<script src="/js/console-utils.js"></script>
-<script src="/js/api-client.js"></script>
-<script src="/js/request-builder.js"></script>
-<script src="/js/app.js"></script>
+<script src="/js/console-utils.js?v=20260603-3"></script>
+<script src="/js/api-client.js?v=20260603-3"></script>
+<script src="/js/request-builder.js?v=20260603-3"></script>
+<script src="/js/app.js?v=20260603-3"></script>
 </body>
 </html>
 

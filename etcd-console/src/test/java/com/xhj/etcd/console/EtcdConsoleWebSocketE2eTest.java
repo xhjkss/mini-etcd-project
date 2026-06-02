@@ -297,6 +297,35 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
     }
 
     /**
+     * Lease 会话创建/更新/关闭 WebSocket 推送回归。
+     */
+    @Test
+    public void shouldPushLeaseSessionLifecycleEventsOverWebSocket() throws Exception {
+        connectAllNodes();
+
+        StandardWebSocketClient webSocketClient = new StandardWebSocketClient();
+        LeaseSessionCollectorHandler leaseSessionCollectorHandler = new LeaseSessionCollectorHandler(objectMapper);
+        webSocketClient.doHandshake(leaseSessionCollectorHandler,
+                new WebSocketHttpHeaders(),
+                URI.create("ws://127.0.0.1:" + serverPort + "/ws/console")).get(5, TimeUnit.SECONDS);
+
+        JsonNode grantStartResponse = postJson("/api/lease/session/grant-start",
+                objectMapper.writeValueAsString(leaseSessionGrantStartBody(0L, 8L)));
+        assertSuccess(grantStartResponse);
+        long leaseId = grantStartResponse.get("data").get("leaseId").asLong();
+        assertTrue(leaseId > 0L);
+
+        assertTrue(leaseSessionCollectorHandler.awaitCreated(leaseId, 8, TimeUnit.SECONDS));
+        assertTrue(leaseSessionCollectorHandler.awaitUpdated(leaseId, 8, TimeUnit.SECONDS));
+
+        JsonNode stopResponse = deleteJson("/api/lease/session?leaseId=" + leaseId);
+        assertSuccess(stopResponse);
+        assertTrue(leaseSessionCollectorHandler.awaitClosed(leaseId, 8, TimeUnit.SECONDS));
+
+        leaseSessionCollectorHandler.closeIfOpen();
+    }
+
+    /**
      * 执行一轮随机 watch create/cancel + put/delete 混合回归。
      */
     private void runRandomWatchCreateCancelAndPutDeleteRound(long randomSeed, int steps) throws Exception {
@@ -428,6 +457,16 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
     private Map<String, Object> deleteBody(String key) {
         java.util.Map<String, Object> body = new java.util.LinkedHashMap<>();
         body.put("key", key);
+        return body;
+    }
+
+    /**
+     * 构造 grant-start 请求体。
+     */
+    private Map<String, Object> leaseSessionGrantStartBody(long leaseId, long ttlSeconds) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("leaseId", leaseId);
+        body.put("ttlSeconds", ttlSeconds);
         return body;
     }
 
@@ -570,6 +609,75 @@ public class EtcdConsoleWebSocketE2eTest extends AbstractEtcdConsoleE2eTest {
 
         private boolean awaitWatchEvents(long timeout, TimeUnit unit) throws InterruptedException {
             return watchEventLatch.await(timeout, unit);
+        }
+
+        private void closeIfOpen() throws Exception {
+            WebSocketSession session = webSocketSessionReference.get();
+            if (session != null && session.isOpen()) {
+                session.close();
+            }
+        }
+    }
+
+    /**
+     * LeaseSessionCollectorHandler
+     *
+     * @author XJks
+     * @description Lease 会话 WS 事件收集器。
+     */
+    private static class LeaseSessionCollectorHandler extends TextWebSocketHandler {
+
+        private final com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+
+        private final AtomicReference<WebSocketSession> webSocketSessionReference = new AtomicReference<>();
+
+        private final ConcurrentMap<Long, CountDownLatch> createdLatchByLeaseId = new ConcurrentHashMap<>();
+
+        private final ConcurrentMap<Long, CountDownLatch> updatedLatchByLeaseId = new ConcurrentHashMap<>();
+
+        private final ConcurrentMap<Long, CountDownLatch> closedLatchByLeaseId = new ConcurrentHashMap<>();
+
+        private LeaseSessionCollectorHandler(com.fasterxml.jackson.databind.ObjectMapper objectMapper) {
+            this.objectMapper = objectMapper;
+        }
+
+        @Override
+        public void afterConnectionEstablished(WebSocketSession session) {
+            webSocketSessionReference.set(session);
+        }
+
+        @Override
+        protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+            JsonNode messageNode = objectMapper.readTree(message.getPayload());
+            if (messageNode == null || !messageNode.has("messageType")) {
+                return;
+            }
+            String messageType = messageNode.get("messageType").asText();
+            JsonNode payloadNode = messageNode.get("payload");
+            long leaseId = payloadNode != null && payloadNode.has("leaseId") ? payloadNode.get("leaseId").asLong(0L) : 0L;
+            if (leaseId <= 0L) {
+                return;
+            }
+
+            if ("LEASE_SESSION_CREATED".equals(messageType)) {
+                createdLatchByLeaseId.computeIfAbsent(leaseId, ignoredLeaseId -> new CountDownLatch(1)).countDown();
+            } else if ("LEASE_SESSION_UPDATED".equals(messageType)) {
+                updatedLatchByLeaseId.computeIfAbsent(leaseId, ignoredLeaseId -> new CountDownLatch(1)).countDown();
+            } else if ("LEASE_SESSION_CLOSED".equals(messageType)) {
+                closedLatchByLeaseId.computeIfAbsent(leaseId, ignoredLeaseId -> new CountDownLatch(1)).countDown();
+            }
+        }
+
+        private boolean awaitCreated(long leaseId, long timeout, TimeUnit unit) throws InterruptedException {
+            return createdLatchByLeaseId.computeIfAbsent(leaseId, ignoredLeaseId -> new CountDownLatch(1)).await(timeout, unit);
+        }
+
+        private boolean awaitUpdated(long leaseId, long timeout, TimeUnit unit) throws InterruptedException {
+            return updatedLatchByLeaseId.computeIfAbsent(leaseId, ignoredLeaseId -> new CountDownLatch(1)).await(timeout, unit);
+        }
+
+        private boolean awaitClosed(long leaseId, long timeout, TimeUnit unit) throws InterruptedException {
+            return closedLatchByLeaseId.computeIfAbsent(leaseId, ignoredLeaseId -> new CountDownLatch(1)).await(timeout, unit);
         }
 
         private void closeIfOpen() throws Exception {

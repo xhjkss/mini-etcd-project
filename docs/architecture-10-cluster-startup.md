@@ -85,6 +85,9 @@ Linux/macOS（Shell）：
 10. `--noHold`
 - 是否启动后不占用当前终端（默认 `false`）。
 
+11. `--noPause`
+- Windows 批处理防双击窗口关闭参数；Shell 脚本兼容接收该参数。
+
 ## 6. Windows CMD 使用方式
 
 先进入脚本目录：
@@ -153,13 +156,15 @@ chmod +x start-cluster.sh clean-runtime.sh
 
 可按下面顺序理解：
 
-1. 校验参数，准备 runtime/profile 目录。
-2. 清理旧 pid 与残留 `MiniEtcdNodeLauncher` 进程。
+1. 校验参数、命令依赖与端口范围。
+2. 检查目标端口是否已被占用。
 3. 执行 `mvn -pl etcd-kernel -am -DskipTests package`。
 4. 组装 `peerEndpoints`（`n1@host:port,n2@host:port,...`）。
 5. 启动每个节点 `MiniEtcdNodeLauncher`。
-6. 等待各节点写出 pid 文件，超时则回滚并退出。
+6. 等待各节点写出 pid 文件并监听端口，超时则打印节点日志尾部、回滚并退出。
 7. 启动成功后保持终端，托管集群生命周期。
+
+说明：`start-cluster` 只清理当前 profile 的旧 pid 记录，不做全局残留进程清理，避免误杀其他 profile 的实验节点。需要全局清理时使用不带 `--profile` 的 `clean-runtime`。
 
 ## 9. 启动 Console
 
@@ -198,10 +203,11 @@ mvn -pl etcd-console -am spring-boot:run
 ## 12. 常见问题排查
 
 1. 启动报端口占用
-- 换 `--basePort`，或先执行 `clean-runtime` 清理残留进程。
+- 启动脚本会输出占用端口与进程信息；换 `--basePort`，或按需执行 `clean-runtime`。
+- 端口预检会一次性扫描本次集群需要的端口范围，发现占用后直接失败退出，不会继续构建或启动节点。
 
 2. 节点启动失败
-- 查看 `runtime/profiles/<profile>/logs/*.log`。
+- 启动脚本会打印失败节点日志尾部；也可以查看 `runtime/profiles/<profile>/logs/*.log`。
 
 3. Console 无法连接
 - 检查节点是否真的启动成功（看启动终端输出）。

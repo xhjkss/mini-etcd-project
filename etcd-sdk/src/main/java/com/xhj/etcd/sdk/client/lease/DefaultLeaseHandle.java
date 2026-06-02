@@ -6,6 +6,7 @@ import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseRevokeRequest;
 import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseView;
 import com.xhj.etcd.sdk.client.EtcdClient;
 
+import java.util.ArrayList;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -83,6 +84,11 @@ public class DefaultLeaseHandle implements LeaseHandle {
      */
     private final Object keepAliveScheduleLock = new Object();
 
+    /**
+     * 当前 LeaseView 快照。
+     */
+    private volatile LeaseView leaseView = new LeaseView();
+
     public DefaultLeaseHandle(EtcdClient etcdClient,
                               long leaseId,
                               ScheduledExecutorService leaseLifecycleTaskScheduler,
@@ -107,6 +113,7 @@ public class DefaultLeaseHandle implements LeaseHandle {
         this.revokeOnClose = revokeOnClose;
         this.onClosedCallback = onClosedCallback;
         this.currentKeepAliveIntervalMillis = computeKeepAliveIntervalMillis(bootstrapKeepAliveResponse);
+        refreshLeaseView(bootstrapKeepAliveResponse.getLease());
     }
 
     /**
@@ -136,6 +143,30 @@ public class DefaultLeaseHandle implements LeaseHandle {
     @Override
     public boolean isClosed() {
         return closed.get();
+    }
+
+    @Override
+    public LeaseView getLeaseView() {
+        LeaseView currentLeaseView = leaseView;
+        LeaseView copiedLeaseView = new LeaseView();
+        copiedLeaseView.setLeaseId(currentLeaseView.getLeaseId());
+        copiedLeaseView.setTtlSeconds(currentLeaseView.getTtlSeconds());
+        copiedLeaseView.setRemainingSeconds(currentLeaseView.getRemainingSeconds());
+        copiedLeaseView.setKeys(new ArrayList<>(currentLeaseView.getKeys()));
+        return copiedLeaseView;
+    }
+
+    @Override
+    public void refreshLeaseView(LeaseView sourceLeaseView) {
+        if (sourceLeaseView == null) {
+            return;
+        }
+        LeaseView copiedLeaseView = new LeaseView();
+        copiedLeaseView.setLeaseId(sourceLeaseView.getLeaseId());
+        copiedLeaseView.setTtlSeconds(sourceLeaseView.getTtlSeconds());
+        copiedLeaseView.setRemainingSeconds(sourceLeaseView.getRemainingSeconds());
+        copiedLeaseView.setKeys(sourceLeaseView.getKeys() == null ? new ArrayList<String>() : new ArrayList<>(sourceLeaseView.getKeys()));
+        leaseView = copiedLeaseView;
     }
 
     @Override
@@ -169,6 +200,7 @@ public class DefaultLeaseHandle implements LeaseHandle {
                 close();
                 return;
             }
+            refreshLeaseView(keepAliveResponse.getLease());
             // TODO: keepAlive 成功后把连续失败计数清零。
             consecutiveFailureCount.set(0);
             refreshKeepAliveIntervalIfNeeded(keepAliveResponse);
@@ -185,11 +217,11 @@ public class DefaultLeaseHandle implements LeaseHandle {
      * 根据租约 TTL 计算固定 keepAlive 调度间隔。
      */
     private long computeKeepAliveIntervalMillis(LeaseKeepAliveResponse keepAliveResponse) {
-        LeaseView leaseView = keepAliveResponse == null ? null : keepAliveResponse.getLease();
-        if (leaseView == null) {
+        LeaseView currentLeaseView = keepAliveResponse == null ? null : keepAliveResponse.getLease();
+        if (currentLeaseView == null) {
             return MIN_KEEP_ALIVE_INTERVAL_MILLIS;
         }
-        long ttlSeconds = leaseView.getRemainingSeconds() > 0L ? leaseView.getRemainingSeconds() : leaseView.getTtlSeconds();
+        long ttlSeconds = currentLeaseView.getRemainingSeconds() > 0L ? currentLeaseView.getRemainingSeconds() : currentLeaseView.getTtlSeconds();
         long candidateDelayMillis = (ttlSeconds * 1000L) / 3L;
         if (candidateDelayMillis <= 0L) {
             return MIN_KEEP_ALIVE_INTERVAL_MILLIS;
@@ -207,9 +239,9 @@ public class DefaultLeaseHandle implements LeaseHandle {
         if (keepAliveResponse == null || keepAliveResponse.getLease() == null) {
             return true;
         }
-        LeaseView leaseView = keepAliveResponse.getLease();
+        LeaseView currentLeaseView = keepAliveResponse.getLease();
         // TODO:服务端若返回剩余 TTL <= 0，说明租约已经不可续约（已到期或已失效）。
-        return leaseView.getRemainingSeconds() <= 0L;
+        return currentLeaseView.getRemainingSeconds() <= 0L;
     }
 
     /**

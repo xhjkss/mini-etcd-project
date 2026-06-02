@@ -110,7 +110,7 @@ public class WatchService {
                 consoleWebSocketGateway.broadcastEvent(
                         WebSocketMessageType.WATCH_CREATED,
                         nodeId,
-                        buildWatchSessionResponse(watchHandle));
+                        buildWatchSessionPayload(buildWatchSessionResponse(watchHandle)));
             }
 
             @Override
@@ -142,7 +142,7 @@ public class WatchService {
                 consoleWebSocketGateway.broadcastEvent(
                         WebSocketMessageType.WATCH_CANCELED,
                         nodeId,
-                        buildWatchSessionResponse(watchHandle));
+                        buildWatchSessionPayload(buildWatchSessionResponse(watchHandle)));
                 if (watchHandle != null) {
                     removeWatchHandleIfSame(nodeId, watchHandle);
                 }
@@ -150,12 +150,12 @@ public class WatchService {
 
             @Override
             public void onError(Throwable cause) {
+                WatchHandle watchHandle = getWatchHandle();
                 // watch 内部异常统一转换为 WATCH_ERROR，前端可据此提示用户重建订阅。
                 consoleWebSocketGateway.broadcastEvent(
                         WebSocketMessageType.WATCH_ERROR,
                         nodeId,
-                        cause == null ? "unknown" : cause.getMessage());
-                WatchHandle watchHandle = getWatchHandle();
+                        buildWatchSessionPayload(buildWatchSessionResponse(watchHandle)));
                 if (watchHandle != null) {
                     removeWatchHandleIfSame(nodeId, watchHandle);
                 }
@@ -217,7 +217,7 @@ public class WatchService {
         consoleWebSocketGateway.broadcastEvent(
                 WebSocketMessageType.WATCH_CANCELED,
                 nodeId,
-                buildWatchSessionResponse(watchHandle));
+                buildWatchSessionPayload(buildWatchSessionResponse(watchHandle)));
     }
 
     /**
@@ -255,12 +255,20 @@ public class WatchService {
     }
 
     /**
-     * 构造 watch 事件推送载荷。
+     * 构造 watch 会话状态载荷。
      *
-     * <p>WebSocket 统一消息体：会话状态 + 通知事件，前端可直接按 watchId 分流展示。</p>
+     * <p>用于 WATCH_CREATED / WATCH_CANCELED / WATCH_ERROR。</p>
      */
-    private WatchNotificationPayload buildWatchNotificationPayload(WatchSessionResponse watchSessionResponse,
-                                                                   WatchNotification watchNotification) {
+    private WatchNotificationPayload buildWatchSessionPayload(WatchSessionResponse watchSessionResponse) {
+        WatchNotificationPayload watchNotificationPayload = new WatchNotificationPayload();
+        watchNotificationPayload.setWatchSessionResponse(watchSessionResponse);
+        return watchNotificationPayload;
+    }
+
+    /**
+     * 构造 watch 事件推送载荷。
+     */
+    private WatchNotificationPayload buildWatchEventPayload(WatchSessionResponse watchSessionResponse, WatchNotification watchNotification) {
         WatchNotificationPayload watchNotificationPayload = new WatchNotificationPayload();
         watchNotificationPayload.setWatchSessionResponse(watchSessionResponse);
         watchNotificationPayload.setWatchNotification(watchNotification);
@@ -299,7 +307,7 @@ public class WatchService {
         consoleWebSocketGateway.broadcastEvent(
                 WebSocketMessageType.WATCH_EVENT,
                 nodeId,
-                buildWatchNotificationPayload(watchSessionResponse, watchNotification));
+                buildWatchEventPayload(watchSessionResponse, watchNotification));
     }
 
     /**

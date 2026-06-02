@@ -81,6 +81,105 @@
                 };
             }
         },
+        // ==================== Txn Request Builder ====================
+        txn: {
+            /**
+             * 构造 Txn compare 条件，字段与 etcdrpc.TxnCompareCondition 对齐。
+             */
+            buildCompareCondition: function (key, compareFieldType, compareOperatorType, value, longValue) {
+                return {
+                    key: key,
+                    compareFieldType: compareFieldType,
+                    compareOperatorType: compareOperatorType,
+                    data: compareFieldType === 'VALUE' ? (value || '') : toNumberOrZero(longValue)
+                };
+            },
+            /**
+             * 构造 Txn 分支操作，字段与 etcdrpc.TxnOperationRequest 对齐。
+             */
+            buildOperationRequest: function (operationType, key, value, leaseId, prefixMatch) {
+                if (operationType === 'PUT') {
+                    return {
+                        operationType: operationType,
+                        data: requestBuilder.mvcc.buildPut(key, value || '', leaseId)
+                    };
+                }
+                if (operationType === 'DELETE') {
+                    return {
+                        operationType: operationType,
+                        data: requestBuilder.mvcc.buildDelete(key)
+                    };
+                }
+                if (operationType === 'GET') {
+                    return {
+                        operationType: operationType,
+                        data: requestBuilder.mvcc.buildGet(key)
+                    };
+                }
+                if (operationType === 'RANGE') {
+                    return {
+                        operationType: operationType,
+                        data: {
+                            startKey: key,
+                            endKeyExclusive: '',
+                            prefixMatch: !!prefixMatch,
+                            limit: 0,
+                            keysOnly: false,
+                            countOnly: false,
+                            revision: 0,
+                            linearizableRead: false
+                        }
+                    };
+                }
+                if (operationType === 'DELETE_RANGE') {
+                    return {
+                        operationType: operationType,
+                        data: {
+                            startKey: key,
+                            endKeyExclusive: '',
+                            prefixMatch: !!prefixMatch,
+                            prevKv: false
+                        }
+                    };
+                }
+                return {
+                    operationType: operationType,
+                    data: {}
+                };
+            },
+            /**
+             * 构造 TxnRequest，直接复用 etcdrpc.TxnRequest 的 compare/success/failure 字段结构。
+             */
+            buildExecute: function (txnForm) {
+                txnForm = txnForm || {};
+                return {
+                    compareConditions: [
+                        this.buildCompareCondition(
+                            txnForm.compareKey,
+                            txnForm.compareFieldType,
+                            txnForm.compareOperatorType,
+                            txnForm.compareValue,
+                            txnForm.compareLongValue)
+                    ],
+                    successOperations: [
+                        this.buildOperationRequest(
+                            txnForm.successOperationType,
+                            txnForm.successKey,
+                            txnForm.successValue,
+                            txnForm.successLeaseId,
+                            txnForm.successPrefixMatch)
+                    ],
+                    failureOperations: [
+                        this.buildOperationRequest(
+                            txnForm.failureOperationType,
+                            txnForm.failureKey,
+                            txnForm.failureValue,
+                            txnForm.failureLeaseId,
+                            txnForm.failurePrefixMatch)
+                    ]
+                };
+            }
+        },
         // ==================== Watch Request Builder ====================
         watch: {
             buildSubscribe: function (startKey, prefixMatch) {
@@ -109,6 +208,17 @@
             },
             buildList: function () {
                 return {};
+            },
+            buildSessionStart: function (leaseId) {
+                return {
+                    leaseId: toNumberOrZero(leaseId)
+                };
+            },
+            buildSessionGrantStart: function (leaseId, ttlSeconds) {
+                return {
+                    leaseId: toNumberOrZero(leaseId),
+                    ttlSeconds: toNumberOrZero(ttlSeconds)
+                };
             }
         },
         // ==================== Cluster Diagnostic Request Builder ====================

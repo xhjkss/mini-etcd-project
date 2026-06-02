@@ -1,5 +1,7 @@
 package com.xhj.etcd.sdk.client.lease;
 
+import com.xhj.etcd.kernel.etcd.etcdrpc.LeaseView;
+
 /**
  * LeaseHandle
  *
@@ -17,6 +19,16 @@ public interface LeaseHandle {
      * 是否已关闭。
      */
     boolean isClosed();
+
+    /**
+     * 获取当前 LeaseView。
+     */
+    LeaseView getLeaseView();
+
+    /**
+     * 用租约视图刷新本地 LeaseView。
+     */
+    void refreshLeaseView(LeaseView leaseView);
 
     /**
      * 关闭自动续约。

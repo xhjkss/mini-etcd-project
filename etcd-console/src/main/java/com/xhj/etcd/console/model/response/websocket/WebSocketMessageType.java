@@ -58,6 +58,34 @@ public enum WebSocketMessageType {
     WATCH_ERROR,
 
     /**
+     * Lease 会话创建完成通知。
+     *
+     * <p>payload: {@link com.xhj.etcd.console.model.response.lease.LeaseSessionResponse}。</p>
+     */
+    LEASE_SESSION_CREATED,
+
+    /**
+     * Lease 会话状态更新通知。
+     *
+     * <p>payload: {@link com.xhj.etcd.console.model.response.lease.LeaseSessionResponse}。</p>
+     */
+    LEASE_SESSION_UPDATED,
+
+    /**
+     * Lease 会话关闭通知。
+     *
+     * <p>payload: {@link com.xhj.etcd.console.model.response.lease.LeaseSessionResponse}。</p>
+     */
+    LEASE_SESSION_CLOSED,
+
+    /**
+     * Lease 会话错误通知。
+     *
+     * <p>payload: {@link com.xhj.etcd.console.model.response.lease.LeaseSessionResponse}。</p>
+     */
+    LEASE_SESSION_ERROR,
+
+    /**
      * WebSocket 框架层错误通知。
      *
      * <p>payload: {@link java.lang.String}。</p>

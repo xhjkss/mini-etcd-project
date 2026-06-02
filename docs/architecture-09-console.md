@@ -54,11 +54,18 @@
 - `POST /api/lease/revoke`
 - `POST /api/lease/ttl`
 - `POST /api/lease/list`
+- `POST /api/lease/session/start`
+- `POST /api/lease/session/grant-start`
+- `DELETE /api/lease/session`
+- `GET /api/lease/session`
 
-5. `CompactController`
+5. `TxnController`
+- `POST /api/txn/execute`
+
+6. `CompactController`
 - `POST /api/compact`
 
-6. `ClusterDiagnosticController`
+7. `ClusterDiagnosticController`
 - `GET /api/cluster/node-status/on-all-nodes`
 - `GET /api/cluster/node-status/on-node`
 - `POST /api/cluster/kv-state-hash/on-node`
@@ -78,10 +85,14 @@
 - 管理用户手动 watch。
 - 结构是 `nodeId -> (watchId -> WatchHandle)`。
 
-4. `LeaseService` / `CompactService`
-- 分别转发 lease / compact API。
+4. `LeaseService`
+- 普通 lease API 只转发 `grant/ttl/list/revoke`。
+- LeaseHandle 会话 API 负责注册、替换、关闭和查询自动续约句柄。
 
-5. `ClusterDiagnosticService`
+5. `TxnService` / `CompactService`
+- 分别转发 txn / compact API。
+
+6. `ClusterDiagnosticService`
 - 聚合节点状态、节点哈希、全节点 range 对比读。
 
 ### 3.3 websocket：推送层
@@ -97,6 +108,10 @@
 3. `WebSocketNodeKvWatchScheduler`
 - 维护“浏览器自动 watch”（每节点 1 条）。
 - 把节点 KV 变更推送为 `KV_CHANGED`，用于数据浏览页实时刷新。
+
+4. `WebSocketLeaseSessionScheduler`
+- 定时刷新 Console 托管的 LeaseHandle 会话状态。
+- 推送 `LEASE_SESSION_UPDATED / LEASE_SESSION_CLOSED / LEASE_SESSION_ERROR`。
 
 ## 4. 前端结构（静态资源）
 
@@ -213,7 +228,11 @@ flowchart LR
 5. `WATCH_EVENT`
 6. `WATCH_CANCELED`
 7. `WATCH_ERROR`
-8. `CONSOLE_ERROR`
+8. `LEASE_SESSION_CREATED`
+9. `LEASE_SESSION_UPDATED`
+10. `LEASE_SESSION_CLOSED`
+11. `LEASE_SESSION_ERROR`
+12. `CONSOLE_ERROR`
 
 ## 9. 小白实操路径（推荐顺序）
 
@@ -221,8 +240,9 @@ flowchart LR
 2. 进入数据浏览，新建 key（如 `app/config/name`）。
 3. 在操作中心执行 `get/range/put/delete/delete-range`。
 4. 创建 watch，执行 put/delete，观察 `WATCH_EVENT`。
-5. 执行 compact 与 lease 操作，查看结果是否返回成功。
-6. 在节点状态页查看 leader/term/revision/hash。
+5. 执行 lease grant/ttl/list/revoke，必要时启动 LeaseHandle 会话观察续约状态。
+6. 执行 compact，查看结果是否返回成功。
+7. 在节点状态页查看 leader/term/revision/hash。
 
 ## 10. 常见问题
 

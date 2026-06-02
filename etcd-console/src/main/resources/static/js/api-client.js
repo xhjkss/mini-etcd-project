@@ -63,6 +63,12 @@
                 return post('/api/mvcc/delete-range', deleteRangeRequest);
             }
         },
+        // ==================== Txn API ====================
+        txn: {
+            execute: function (txnExecuteRequest) {
+                return post('/api/txn/execute', txnExecuteRequest);
+            }
+        },
         // ==================== Watch API ====================
         watch: {
             list: function () {
@@ -88,6 +94,18 @@
             },
             list: function (leaseListRequest) {
                 return post('/api/lease/list', leaseListRequest || {});
+            },
+            startSession: function (leaseSessionStartRequest) {
+                return post('/api/lease/session/start', leaseSessionStartRequest);
+            },
+            grantAndStartSession: function (leaseSessionGrantStartRequest) {
+                return post('/api/lease/session/grant-start', leaseSessionGrantStartRequest);
+            },
+            stopSession: function (leaseId) {
+                return del('/api/lease/session?leaseId=' + encodeURIComponent(leaseId));
+            },
+            listSessions: function () {
+                return get('/api/lease/session');
             }
         },
         // ==================== Compact API ====================

@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # What this script does:
 # 1) Stop running node processes found from runtime PID files.
-# 2) Kill residual MiniEtcdNodeLauncher processes as fallback.
+# 2) Kill residual MiniEtcdNodeLauncher processes as fallback when cleaning all profiles.
 # 3) Remove runtime artifacts:
 #    - data
 #    - logs
@@ -20,6 +20,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUNTIME_DIR="$SCRIPT_DIR/runtime"
 PROFILE=""
+NO_PAUSE=false
 
 # Supported formats:
 # - --profile=value
@@ -28,6 +29,9 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile=*) PROFILE="${1#*=}"; shift ;;
     --profile) PROFILE="${2:-}"; shift 2 ;;
+    --noPause) NO_PAUSE=true; shift ;;
+    --noPause=true) NO_PAUSE=true; shift ;;
+    --noPause=false) NO_PAUSE=false; shift ;;
     *) echo "[mini-etcd] unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -50,6 +54,7 @@ stop_nodes_by_pid_file() {
       kill "$node_pid" >/dev/null 2>&1 || true
       sleep 0.2
       kill -9 "$node_pid" >/dev/null 2>&1 || true
+      echo "[mini-etcd] stopped node pid=$node_pid"
     fi
   done < "$pid_file"
   rm -f "$pid_file" >/dev/null 2>&1 || true
@@ -89,7 +94,8 @@ if [[ -d "$PROFILE_RUNTIME_DIR" ]]; then
   # Clean only one target profile.
   echo "[mini-etcd] cleaning runtime profile: runtime/profiles/$PROFILE"
   stop_nodes_by_pid_file "$PROFILE_RUNTIME_DIR/state/cluster.pids"
-  stop_residual_launcher_processes
+  # Profile cleanup must not kill Java processes from other profiles.
+  # Global residual cleanup is only safe when cleaning the whole runtime directory.
   rm -rf "$PROFILE_RUNTIME_DIR"
 else
   echo "[mini-etcd] profile runtime directory not found: runtime/profiles/$PROFILE"
