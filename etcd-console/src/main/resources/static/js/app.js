@@ -3,6 +3,34 @@ Vue.component('result-panel', {
     props: ['summary', 'raw']
 });
 
+function readInitialQueryParam(name) {
+    var search = window.location.search || '';
+    if (!search || search.length <= 1) {
+        return '';
+    }
+    var pairs = search.substring(1).split('&');
+    for (var i = 0; i < pairs.length; i++) {
+        var pair = pairs[i].split('=');
+        if (decodeURIComponent(pair[0] || '') === name) {
+            return decodeURIComponent(pair[1] || '');
+        }
+    }
+    return '';
+}
+
+function readInitialQueryBoolean(name) {
+    var value = readInitialQueryParam(name);
+    return value === 'true' || value === '1';
+}
+
+function readInitialQueryNumber(name, defaultValue) {
+    var value = Number(readInitialQueryParam(name));
+    if (isNaN(value)) {
+        return defaultValue;
+    }
+    return value;
+}
+
 var app = new Vue({
     el: '#app',
     data: {
@@ -10,8 +38,8 @@ var app = new Vue({
         webSocketClient: null,
         webSocketReconnectTimer: null,
         pageDestroyed: false,
-        activeView: 'browser',
-        activeOperationTab: 'kv',
+        activeView: readInitialQueryParam('view') || 'browser',
+        activeOperationTab: readInitialQueryParam('tab') || 'kv',
         navItems: [
             {key: 'browser', label: '数据浏览', icon: 'el-icon-folder-opened'},
             {key: 'operations', label: '操作中心', icon: 'el-icon-s-operation'},
@@ -46,32 +74,32 @@ var app = new Vue({
             port: null
         },
         kvForm: {
-            key: '',
-            value: '',
-            leaseId: null
+            key: readInitialQueryParam('kvKey'),
+            value: readInitialQueryParam('kvValue'),
+            leaseId: readInitialQueryNumber('kvLeaseId', null)
         },
         txnForm: {
-            compareKey: '',
+            compareKey: readInitialQueryParam('txnCompareKey'),
             compareFieldType: 'VALUE',
             compareOperatorType: 'EQUAL',
-            compareValue: '',
+            compareValue: readInitialQueryParam('txnCompareValue'),
             compareLongValue: null,
             successOperationType: 'PUT',
-            successKey: '',
-            successValue: '',
+            successKey: readInitialQueryParam('txnThenKey'),
+            successValue: readInitialQueryParam('txnThenValue'),
             successLeaseId: null,
             successPrefixMatch: false,
             failureOperationType: 'PUT',
-            failureKey: '',
-            failureValue: '',
+            failureKey: readInitialQueryParam('txnElseKey'),
+            failureValue: readInitialQueryParam('txnElseValue'),
             failureLeaseId: null,
             failurePrefixMatch: false
         },
         txnOperationResult: null,
         txnOperationSummary: null,
         watchForm: {
-            key: '',
-            prefix: false
+            key: readInitialQueryParam('watchKey'),
+            prefix: readInitialQueryBoolean('watchPrefix')
         },
         watchSessions: [],
         watchEventListByWatchId: {},
@@ -89,7 +117,7 @@ var app = new Vue({
             leaseId: null,
             ttlSeconds: null
         },
-        leaseInnerTab: 'plain',
+        leaseInnerTab: readInitialQueryParam('leaseTab') || 'plain',
         leaseOperationResult: null,
         leaseOperationSummary: null,
         leaseSessions: [],
@@ -99,7 +127,7 @@ var app = new Vue({
         comparePrefixValue: '',
         comparePrefixOperationResult: null,
         comparePrefixOperationSummary: null,
-        compactRevision: 0,
+        compactRevision: readInitialQueryNumber('compactRevision', 0),
         compactOperationResult: null,
         compactOperationSummary: null,
         operationLogs: [],
@@ -2352,6 +2380,3 @@ var app = new Vue({
         }
     }
 });
-
-
-

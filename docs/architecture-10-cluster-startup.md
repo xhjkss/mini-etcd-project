@@ -93,7 +93,7 @@ Linux/macOS（Shell）：
 先进入脚本目录：
 
 ```cmd
-cd /d D:\IDEA_Code_Store_Position\mini-etcd-project\etcd-console\scripts
+cd etcd-console/scripts
 ```
 
 默认启动 3 节点：
@@ -171,7 +171,8 @@ chmod +x start-cluster.sh clean-runtime.sh
 在项目根目录执行：
 
 ```bash
-mvn -pl etcd-console -am spring-boot:run
+mvn -pl etcd-console -am -DskipTests install
+mvn -f etcd-console/pom.xml org.springframework.boot:spring-boot-maven-plugin:2.7.18:run
 ```
 
 默认访问地址：

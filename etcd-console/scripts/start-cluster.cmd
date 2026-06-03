@@ -41,14 +41,22 @@ if "%~1"=="" goto args_done
 set "ARG=%~1"
 set "ARG_KEY="
 set "ARG_VALUE="
-for /f "tokens=1,2 delims==" %%A in ("%ARG%") do (
+for /f "tokens=1,2 delims==" %%A in ("!ARG!") do (
     set "ARG_KEY=%%~A"
     set "ARG_VALUE=%%~B"
 )
 
 if /I "!ARG_KEY!"=="--noHold" (
     if "!ARG_VALUE!"=="" (
-        set "NO_HOLD=1"
+        if /I "%~2"=="true" (
+            set "NO_HOLD=1"
+            shift
+        ) else if /I "%~2"=="false" (
+            set "NO_HOLD=0"
+            shift
+        ) else (
+            set "NO_HOLD=1"
+        )
     ) else if /I "!ARG_VALUE!"=="true" (
         set "NO_HOLD=1"
     ) else if /I "!ARG_VALUE!"=="false" (
@@ -64,7 +72,15 @@ if /I "!ARG_KEY!"=="--noHold" (
 
 if /I "!ARG_KEY!"=="--noPause" (
     if "!ARG_VALUE!"=="" (
-        set "NO_PAUSE=1"
+        if /I "%~2"=="true" (
+            set "NO_PAUSE=1"
+            shift
+        ) else if /I "%~2"=="false" (
+            set "NO_PAUSE=0"
+            shift
+        ) else (
+            set "NO_PAUSE=1"
+        )
     ) else if /I "!ARG_VALUE!"=="true" (
         set "NO_PAUSE=1"
     ) else if /I "!ARG_VALUE!"=="false" (
@@ -107,7 +123,7 @@ if /I "!ARG_KEY!"=="--clusterSize" (
 ) else if /I "!ARG_KEY!"=="--snapshotTriggerLogCount" (
     set "SNAPSHOT_TRIGGER_LOG_COUNT=!ARG_VALUE!"
 ) else (
-    echo [mini-etcd] unknown argument: %~1
+    echo [mini-etcd] unknown argument: !ARG!
     set "FAIL_MESSAGE=unknown argument."
     goto :fail_and_exit
 )
